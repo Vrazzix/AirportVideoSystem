@@ -1,0 +1,16 @@
+[project]
+name = "application-for-models"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "albumentations>=1.3.0",
+    "beautifulsoup4>=4.14.3",
+    "bs4>=0.0.2",
+    "numpy>=1.24.0",
+    "opencv-python-headless>=4.8.0",
+    "pillow>=10.0.0",
+    "streamlit>=1.28.0",
+    "ultralytics>=8.0.0",
+]
