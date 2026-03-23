@@ -16,7 +16,6 @@ from PIL import Image, ImageDraw, ImageFont
 import time
 import torch
 from collections import defaultdict
-import plotly.graph_objects as go
 
 _USE_HALF = torch.cuda.is_available()
 
@@ -111,6 +110,8 @@ with st.sidebar:
     st.markdown("## 🗺️ Semantic SLAM")
     slam_enabled = st.checkbox("Включить Semantic SLAM", value=True,
                                help="Верифицирует детекции по накопленным наблюдениям и ORB-признакам")
+    motion_threshold = st.slider("Порог движения (пиксели)", 0.0, 10.0, 2.0, 0.5,
+                                 help="Минимальное среднее смещение точек для обновления карты. Защищает от 'улетания' карты при статичной камере.")
     slam_min_obs = st.slider("Мин. наблюдений для верификации", 2, 15, 3,
                              help="Объект подтверждается только после N кадров стабильного трекинга")
     slam_min_feat = st.slider("Мин. ORB-признаков в bbox", 0, 10, 2,
@@ -306,235 +307,162 @@ class SimpleTracker:
 # ══════════════════════════════════════════════
 class SemanticSLAM:
     """
-    Semantic SLAM with SIFT features, keyframe-based triangulation,
-    and reprojection-error filtering for high-quality 3D point clouds.
+    Lightweight Semantic SLAM for verifying detected object positions.
+
+    For each tracked object, counts how many frames it has been
+    consistently observed and how many ORB texture features fall
+    inside its bounding box.  A detection is marked *verified* only
+    when both thresholds are met, which suppresses false positives
+    that appear for only one or two frames (reflections, blur, noise).
+
+    Camera-pose estimation (Essential-matrix decomposition) is also
+    performed so that, in future extensions, true 3-D triangulation
+    can be added without refactoring the interface.
     """
 
-    _KEYFRAME_MIN_MATCHES = 40
-    _KEYFRAME_MIN_MOVEMENT = 0.005   # min median pixel displacement
-
     def __init__(self, min_observations: int = 3, min_features: int = 2):
-        self.sift = cv2.SIFT_create(nfeatures=2000)
-        self.matcher = cv2.BFMatcher(cv2.NORM_L2)
+        self.orb = cv2.ORB_create(nfeatures=1500)
+        self.bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
         self.prev_gray = None
         self.prev_kpts = None
         self.prev_desc = None
         self.camera_matrix = None
-        self.pose = np.eye(4)
-        self.semantic_map = {}
+        self.pose = np.eye(4)           # cumulative camera pose (world-to-cam)
+        self.semantic_map = {}          # track_id -> dict
         self.min_observations = min_observations
         self.min_features = min_features
         self.verified_ids: set = set()
         self.frame_count = 0
-        # 3-D data
-        self.cam_traj: list = [np.zeros(3)]
-        self.prev_centers: dict = {}
+        # ── 3-D map data ──────────────────────────────────────────────
+        self.cam_traj: list = [np.zeros(3)]   # camera positions in world frame
+        self.prev_centers: dict = {}           # track_id -> (cx, cy) prev frame
         self._frame_size: tuple = (1920, 1080)
-        # 3-D point cloud
-        self.point_cloud: list = []       # [(x, y, z, cls_label)]
-        self._max_cloud_pts: int = 15000
-        # Keyframe management
-        self._kf_gray = None
-        self._kf_kpts = None
-        self._kf_desc = None
-        self._kf_pose = np.eye(4)
-        self._frames_since_kf = 0
+        # ── 3-D point cloud (reconstructed environment) ──────────────
+        self.point_cloud: list = []            # [(x, y, z, cls_label)] world pts
+        self._max_cloud_pts: int = 10000       # ring-buffer cap
 
     def _init_camera(self, w: int, h: int):
+        """Estimate pinhole camera matrix from frame dimensions."""
         f = float(max(w, h))
         self.camera_matrix = np.array(
             [[f, 0, w / 2.0],
              [0, f, h / 2.0],
              [0, 0, 1.0]], dtype=np.float64)
 
-    def _match_features(self, desc1, desc2, ratio=0.75):
-        """Lowe's ratio test for robust matching."""
-        if desc1 is None or desc2 is None:
-            return []
-        raw = self.matcher.knnMatch(desc1, desc2, k=2)
-        good = []
-        for pair in raw:
-            if len(pair) == 2:
-                m, n = pair
-                if m.distance < ratio * n.distance:
-                    good.append(m)
-        return good
-
-    def _triangulate_and_filter(self, pts1, pts2, R, t, tracked_detections):
-        """Triangulate points between two views with reprojection-error filtering."""
-        K = self.camera_matrix
-        P1 = K @ np.eye(3, 4)
-        P2 = K @ np.hstack([R, t])
-
-        pts4d = cv2.triangulatePoints(P1, P2, pts1.T, pts2.T)
-        pose_inv = np.linalg.inv(self.pose)
-        R_w = pose_inv[:3, :3]
-        t_w = pose_inv[:3, 3]
-
-        new_points = []
-        for i in range(pts4d.shape[1]):
-            w4 = pts4d[3, i]
-            if abs(w4) < 1e-7:
-                continue
-            pos_cam = pts4d[:3, i] / w4
-
-            # Depth filter
-            if pos_cam[2] <= 0.1 or pos_cam[2] > 150:
-                continue
-
-            # Reprojection error filter
-            proj = K @ pos_cam
-            if abs(proj[2]) < 1e-7:
-                continue
-            proj_px = proj[:2] / proj[2]
-            err = np.linalg.norm(proj_px - pts2[i])
-            if err > 3.0:
-                continue
-
-            pos_world = R_w @ pos_cam + t_w
-
-            # Label: inside which bbox?
-            px, py = pts2[i]
-            lbl = -1
-            for det in tracked_detections:
-                if det[0] <= px <= det[2] and det[1] <= py <= det[3]:
-                    lbl = int(det[4])
-                    break
-            new_points.append((float(pos_world[0]), float(pos_world[1]),
-                               float(pos_world[2]), lbl))
-        return new_points, R_w, t_w
-
-    def update(self, frame: np.ndarray, tracked_detections: list) -> set:
+    # Добавляем аргумент motion_threshold (по умолчанию 2.0)
+    def update(self, frame: np.ndarray, tracked_detections: list, motion_threshold: float = 2.0) -> set:
+        """
+        Process one frame.
+        tracked_detections: list of (x1, y1, x2, y2, cls_id, conf, track_id)
+        Returns: set of track_ids whose position is verified.
+        """
         h, w = frame.shape[:2]
         if self.camera_matrix is None:
             self._init_camera(w, h)
         self._frame_size = (w, h)
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        kpts, desc = self.sift.detectAndCompute(gray, None)
+        kpts, desc = self.orb.detectAndCompute(gray, None)
 
-        # ── Camera-motion estimation (sequential frames) ──────────────
-        if (self.prev_desc is not None
+        # ── Camera-motion estimation ──────────────────────────────────
+        if (self.prev_gray is not None
                 and desc is not None
+                and self.prev_desc is not None
                 and kpts is not None and len(kpts) >= 8):
-            good = self._match_features(self.prev_desc, desc)
-            if len(good) >= 8:
-                pts1 = np.float32([self.prev_kpts[m.queryIdx].pt for m in good])
-                pts2 = np.float32([kpts[m.trainIdx].pt for m in good])
-                E, mask = cv2.findEssentialMat(
-                    pts1, pts2, self.camera_matrix,
-                    method=cv2.RANSAC, prob=0.999, threshold=1.0)
-                if E is not None:
-                    _, R, t, pose_mask = cv2.recoverPose(
-                        E, pts1, pts2, self.camera_matrix, mask=mask)
-                    T = np.eye(4)
-                    T[:3, :3] = R
-                    T[:3, 3] = t.flatten()
-                    self.pose = T @ self.pose
+            matches = self.bf.match(self.prev_desc, desc)
+            matches = sorted(matches, key=lambda m: m.distance)[:200]
+            if len(matches) >= 8:
+                pts1 = np.float32([self.prev_kpts[m.queryIdx].pt for m in matches])
+                pts2 = np.float32([kpts[m.trainIdx].pt for m in matches])
+                
+                # ---> ДОБАВЛЕНО: Вычисляем среднее смещение (оптический поток) <---
+                displacements = np.linalg.norm(pts2 - pts1, axis=1)
+                mean_disp = np.mean(displacements)
 
-                    # Triangulate with reprojection-error filter
-                    inlier_idx = pose_mask.ravel() > 0
-                    pts1_in = pts1[inlier_idx]
-                    pts2_in = pts2[inlier_idx]
-                    if len(pts1_in) >= 8:
-                        new_pts, R_w, t_w = self._triangulate_and_filter(
-                            pts1_in, pts2_in, R, t, tracked_detections)
-                        self.point_cloud.extend(new_pts)
+                # Движение карты происходит ТОЛЬКО если среднее смещение больше порога
+                if mean_disp > motion_threshold:
+                    E, mask = cv2.findEssentialMat(
+                        pts1, pts2, self.camera_matrix,
+                        method=cv2.RANSAC, prob=0.999, threshold=1.0,
+                    )
+                    if E is not None:
+                        _, R, t, mask_pose = cv2.recoverPose(
+                            E, pts1, pts2, self.camera_matrix, mask=mask)
+                        
+                        if np.sum(mask_pose) > 10:
+                            # 1. ПРАВИЛЬНОЕ ОБНОВЛЕНИЕ ПОЗЫ (Camera to World)
+                            # Инвертируем R и t для получения трансформации камеры в мире
+                            R_inv = R.T
+                            t_inv = -R_inv @ t
+                            
+                            T_rel = np.eye(4)
+                            T_rel[:3, :3] = R_inv
+                            T_rel[:3, 3] = t_inv.flatten()
+                            
+                            # Умножаем СПРАВА: новая глобальная поза = старая глобальная поза * относительное движение
+                            self.pose = self.pose @ T_rel
 
-                    # Cap point cloud
-                    if len(self.point_cloud) > self._max_cloud_pts:
-                        self.point_cloud = self.point_cloud[-self._max_cloud_pts:]
+                            # 2. ТРИАНГУЛЯЦИЯ (в локальной системе координат)
+                            # Проекционные матрицы для кадров 1 и 2
+                            P1 = self.camera_matrix @ np.hstack((np.eye(3), np.zeros((3, 1))))
+                            P2 = self.camera_matrix @ np.hstack((R, t))
+                            
+                            # Получаем 4D однородные координаты
+                            pts4d = cv2.triangulatePoints(P1, P2, pts1.T, pts2.T)
+                            
+                            # Обязательное деление на W
+                            pts4d /= pts4d[3, :] 
+                            pts3d_local = pts4d[:3, :].T
 
-                    # Triangulate object centers
-                    pose_inv = np.linalg.inv(self.pose)
-                    R_w = pose_inv[:3, :3]
-                    t_w = pose_inv[:3, 3]
-                    K = self.camera_matrix
-                    P1 = K @ np.eye(3, 4)
-                    P2 = K @ np.hstack([R, t])
-                    for det in tracked_detections:
-                        tid = det[6]
-                        if tid < 0 or tid not in self.prev_centers:
-                            continue
-                        pcx, pcy = self.prev_centers[tid]
-                        cx2 = (det[0] + det[2]) / 2.0
-                        cy2 = (det[1] + det[3]) / 2.0
-                        pts4d = cv2.triangulatePoints(
-                            P1, P2,
-                            np.float32([[pcx, pcy]]).T,
-                            np.float32([[cx2, cy2]]).T)
-                        w4v = pts4d[3, 0]
-                        if abs(w4v) < 1e-7:
-                            continue
-                        pc = (pts4d[:3, 0] / w4v).astype(float)
-                        if pc[2] <= 0:
-                            continue
-                        pw = R_w @ pc + t_w
-                        e = self.semantic_map.get(tid)
-                        if e is not None:
-                            if e["pos3d_sum"] is None:
-                                e["pos3d_sum"] = pw.copy()
-                            else:
-                                e["pos3d_sum"] += pw
-                            e["pos3d_n"] += 1
+                            # 3. ФИЛЬТРАЦИЯ И ПЕРЕВОД В ГЛОБАЛЬНУЮ СИСТЕМУ
+                            # Берем только те точки, которые находятся ПЕРЕД камерой (Z > 0)
+                            # и отсеиваем жесткие выбросы (например, Z > 500)
+                            good_mask = (pts3d_local[:, 2] > 0) & (pts3d_local[:, 2] < 500)
+                            good_pts = pts3d_local[good_mask]
 
-                    self.cam_traj.append(t_w.copy())
-
-        # ── Keyframe-based triangulation (wider baseline) ─────────────
-        self._frames_since_kf += 1
-        if (self._kf_desc is not None
-                and desc is not None
-                and self._frames_since_kf >= 5):
-            kf_good = self._match_features(self._kf_desc, desc)
-            if len(kf_good) >= self._KEYFRAME_MIN_MATCHES:
-                kf_pts1 = np.float32([self._kf_kpts[m.queryIdx].pt for m in kf_good])
-                kf_pts2 = np.float32([kpts[m.trainIdx].pt for m in kf_good])
-                disp = np.median(np.linalg.norm(kf_pts2 - kf_pts1, axis=1))
-                if disp > self._KEYFRAME_MIN_MOVEMENT * max(w, h):
-                    E_kf, mask_kf = cv2.findEssentialMat(
-                        kf_pts1, kf_pts2, self.camera_matrix,
-                        method=cv2.RANSAC, prob=0.999, threshold=1.0)
-                    if E_kf is not None:
-                        _, R_kf, t_kf, pm_kf = cv2.recoverPose(
-                            E_kf, kf_pts1, kf_pts2, self.camera_matrix, mask=mask_kf)
-                        inl = pm_kf.ravel() > 0
-                        if np.sum(inl) >= 10:
-                            new_kf_pts, _, _ = self._triangulate_and_filter(
-                                kf_pts1[inl], kf_pts2[inl], R_kf, t_kf, tracked_detections)
-                            self.point_cloud.extend(new_kf_pts)
-                            if len(self.point_cloud) > self._max_cloud_pts:
-                                self.point_cloud = self.point_cloud[-self._max_cloud_pts:]
-                    # New keyframe
-                    self._kf_gray = gray.copy()
-                    self._kf_kpts = kpts
-                    self._kf_desc = desc.copy() if desc is not None else None
-                    self._kf_pose = self.pose.copy()
-                    self._frames_since_kf = 0
-
-        # Init first keyframe
-        if self._kf_desc is None and desc is not None:
-            self._kf_gray = gray.copy()
-            self._kf_kpts = kpts
-            self._kf_desc = desc.copy()
-            self._kf_pose = self.pose.copy()
-            self._frames_since_kf = 0
+                            if len(good_pts) > 0:
+                                # Переводим локальные точки в глобальные координаты мира
+                                ones = np.ones((good_pts.shape[0], 1))
+                                pts_homo = np.hstack((good_pts, ones))
+                                
+                                # Применяем глобальную позу камеры к точкам
+                                pts_global = (self.pose @ pts_homo.T).T[:, :3]
+                                
+                                # Добавляем в облако точек
+                                self.point_cloud.extend(pts_global.tolist())
+                                
+                                # Ограничиваем размер облака, чтобы UI не тормозил
+                                if len(self.point_cloud) > 5000:
+                                    self.point_cloud = self.point_cloud[-5000:]
 
         # ── Update semantic map ───────────────────────────────────────
         for det in tracked_detections:
             x1, y1, x2, y2, cls_id, conf, track_id = det
             if track_id < 0:
                 continue
+
             cx = (x1 + x2) / 2.0
             cy = (y1 + y2) / 2.0
+
+            # Count ORB keypoints that land inside this bounding box
             n_kpts = 0
             if kpts:
-                n_kpts = sum(1 for kp in kpts
-                             if x1 <= kp.pt[0] <= x2 and y1 <= kp.pt[1] <= y2)
+                n_kpts = sum(
+                    1 for kp in kpts
+                    if x1 <= kp.pt[0] <= x2 and y1 <= kp.pt[1] <= y2
+                )
+
             if track_id not in self.semantic_map:
                 self.semantic_map[track_id] = {
-                    "cls": cls_id, "obs": 1, "kpts_sum": n_kpts,
-                    "consistent": True, "cx_sum": cx, "cy_sum": cy,
-                    "conf_sum": conf, "pos3d_sum": None, "pos3d_n": 0,
+                    "cls": cls_id,
+                    "obs": 1,
+                    "kpts_sum": n_kpts,
+                    "consistent": True,
+                    "cx_sum": cx,
+                    "cy_sum": cy,
+                    "conf_sum": conf,
+                    "pos3d_sum": None,
+                    "pos3d_n": 0,
                 }
             else:
                 e = self.semantic_map[track_id]
@@ -544,13 +472,15 @@ class SemanticSLAM:
                 e["cy_sum"] += cy
                 e["conf_sum"] += conf
                 if e["cls"] != cls_id:
-                    e["consistent"] = False
+                    e["consistent"] = False     # class flip → false positive
 
+        # ── Save centers for next-frame triangulation ─────────────────
         self.prev_centers = {
             det[6]: ((det[0] + det[2]) / 2.0, (det[1] + det[3]) / 2.0)
             for det in tracked_detections if det[6] >= 0
         }
 
+        # ── Decide which tracks are verified ─────────────────────────
         self.verified_ids = set()
         for tid, e in self.semantic_map.items():
             avg_kpts = e["kpts_sum"] / max(e["obs"], 1)
@@ -566,9 +496,19 @@ class SemanticSLAM:
         return self.verified_ids
 
     def get_stats(self) -> tuple:
+        """Returns (total_tracked, verified_count)."""
         return len(self.semantic_map), len(self.verified_ids)
 
     def get_map_data(self) -> dict:
+        """
+        Returns all data needed to render the 3-D semantic map.
+
+        Each object entry contains:
+          - track_id, cls, verified, obs
+          - cx_mean, cy_mean  : average image-space center (pixels)
+          - conf_avg          : average detection confidence
+          - pos3d             : triangulated world position (x,y,z) or None
+        """
         fw, fh = self._frame_size
         objects = []
         for tid, e in self.semantic_map.items():
@@ -577,183 +517,254 @@ class SemanticSLAM:
             if e["pos3d_n"] > 0 and e["pos3d_sum"] is not None:
                 pos3d = e["pos3d_sum"] / e["pos3d_n"]
             objects.append({
-                "track_id": tid, "cls": e["cls"],
+                "track_id": tid,
+                "cls": e["cls"],
                 "verified": tid in self.verified_ids,
                 "obs": e["obs"],
-                "cx_mean": e["cx_sum"] / obs, "cy_mean": e["cy_sum"] / obs,
-                "conf_avg": e["conf_sum"] / obs, "pos3d": pos3d,
+                "cx_mean": e["cx_sum"] / obs,
+                "cy_mean": e["cy_sum"] / obs,
+                "conf_avg": e["conf_sum"] / obs,
+                "pos3d": pos3d,
             })
         return {
-            "objects": objects, "cam_traj": self.cam_traj,
-            "point_cloud": self.point_cloud,
-            "frame_w": fw, "frame_h": fh,
+            "objects": objects,
+            "cam_traj": self.cam_traj,
+            "point_cloud": self.point_cloud,   # [(x,y,z,cls_label), ...]
+            "frame_w": fw,
+            "frame_h": fh,
         }
 
 
 # ══════════════════════════════════════════════
-# 3D POINT CLOUD VISUALIZATION (Plotly)
+# SEMANTIC 3-D MAP RENDERER
 # ══════════════════════════════════════════════
 
-def _cls_info(cls_id: int, wheel_cls: int, chock_cls: int):
-    """Returns (name, hex_color) for a class id."""
+_MAP_BG         = (20, 30, 48)
+_MAP_GRID       = (35, 48, 68)
+_CLOUD_BG_COLOR = (55, 65, 80)        # background (environment) points
+_CLOUD_OBJ_COLORS = {}                # filled dynamically per cls
+_MAP_TRAJ       = (200, 200, 200)
+_CANVAS_W, _CANVAS_H = 820, 780
+_MARGIN = 70
+_LEGEND_H = 70
+_PLOT_W = _CANVAS_W - 2 * _MARGIN
+_PLOT_H = _CANVAS_H - 2 * _MARGIN - _LEGEND_H
+
+
+def _cls_color_bgr(cls_id: int, wheel_cls: int, chock_cls: int):
+    """Returns (name, BGR) for a class id."""
     if cls_id == wheel_cls:
-        return "Wheel",  "#3c8cdc"
+        return "Wheel",  (220,  60,  60)
     if cls_id == chock_cls:
-        return "Chock",  "#ffa532"
-    return "Person", "#32cd32"
+        return "Chock",  ( 50, 165, 255)
+    return "Person", ( 50, 205,  50)
+
+
+def _w2c(x, z, x_min, x_max, z_min, z_max):
+    """World XZ → canvas pixel (col, row)."""
+    xr = max(x_max - x_min, 1e-3)
+    zr = max(z_max - z_min, 1e-3)
+    col = _MARGIN + int((x - x_min) / xr * _PLOT_W)
+    row = _MARGIN + int((1.0 - (z - z_min) / zr) * _PLOT_H)
+    return col, row
 
 
 def _pseudo_xz(cx_mean, cy_mean, fw, fh):
+    """Rough ground-plane XZ from image coordinates."""
     z = max((1.0 - cy_mean / fh) * 10.0, 0.05)
     x = (cx_mean / fw - 0.5) * z * (fw / fh) * 2.0
     return float(x), float(z)
 
 
-def build_slam_plotly(slam: "SemanticSLAM", wheel_cls: int, chock_cls: int) -> go.Figure:
+def render_map_3d(slam: "SemanticSLAM", wheel_cls: int, chock_cls: int) -> np.ndarray:
     """
-    Build an interactive Plotly 3D scatter figure showing:
-      1. Sparse point cloud (triangulated SIFT features) as environment
-      2. Camera trajectory as a 3D line
-      3. Verified objects as large colored markers
-      4. Unverified objects as small grey markers
+    Render a bird's-eye view of the **reconstructed 3-D environment**.
+
+    The canvas shows:
+      1. Sparse point cloud — triangulated ORB features that form the
+         visible "space".  Background points are dark-grey; points that
+         fell inside a detection bbox are tinted with the class colour.
+      2. Camera trajectory — white polyline with a bright dot at the
+         current position.
+      3. Verified objects — large coloured circles with labels.  These
+         are the detections confirmed to occupy real 3-D structure.
+      4. Unverified objects — small hollow grey circles.
+
+    Returns a BGR uint8 image of shape (_CANVAS_H, _CANVAS_W, 3).
     """
     data = slam.get_map_data()
-    objects  = data["objects"]
-    cam_traj = data["cam_traj"]
-    cloud    = data["point_cloud"]
-    fw, fh   = data["frame_w"], data["frame_h"]
+    objects    = data["objects"]
+    cam_traj   = data["cam_traj"]
+    cloud      = data["point_cloud"]     # [(x,y,z,cls_label), ...]
+    fw, fh     = data["frame_w"], data["frame_h"]
 
-    traces = []
+    canvas = np.full((_CANVAS_H, _CANVAS_W, 3), _MAP_BG, dtype=np.uint8)
 
-    # ── 1. Point cloud (environment) ──────────────────────────────────
-    if cloud:
-        # Subsample for performance (max ~4000 points in plotly)
-        step = max(1, len(cloud) // 4000)
-        sampled = cloud[::step]
+    # ── Collect every XZ we will draw so we can compute bounds ────────
+    all_xz = []
 
-        bg_pts = [(p[0], p[1], p[2]) for p in sampled if p[3] < 0]
-        if bg_pts:
-            bx, by, bz = zip(*bg_pts)
-            traces.append(go.Scatter3d(
-                x=bx, y=by, z=bz, mode="markers",
-                marker=dict(size=1.5, color="#4a5568", opacity=0.4),
-                name=f"Environment ({len(bg_pts)} pts)",
-                hoverinfo="skip",
-            ))
+    # Point cloud (use X and Z)
+    for (px, py, pz, _lbl) in cloud:
+        all_xz.append((px, pz))
 
-        # Object-class points grouped by class
-        cls_pts: dict = {}
-        for p in sampled:
-            if p[3] >= 0:
-                cls_pts.setdefault(int(p[3]), []).append((p[0], p[1], p[2]))
-        for cid, pts in cls_pts.items():
-            name, color = _cls_info(cid, wheel_cls, chock_cls)
-            ox, oy, oz = zip(*pts)
-            traces.append(go.Scatter3d(
-                x=ox, y=oy, z=oz, mode="markers",
-                marker=dict(size=2.5, color=color, opacity=0.7),
-                name=f"{name} pts ({len(pts)})",
-                hoverinfo="skip",
-            ))
-
-    # ── 2. Camera trajectory ──────────────────────────────────────────
-    traj_pts = []
+    # Camera trajectory
+    traj_xz = []
     for p in cam_traj:
         if isinstance(p, np.ndarray) and p.shape[0] >= 3:
-            traj_pts.append((float(p[0]), float(p[1]), float(p[2])))
-    if traj_pts:
-        tx, ty, tz = zip(*traj_pts)
-        traces.append(go.Scatter3d(
-            x=tx, y=ty, z=tz, mode="lines",
-            line=dict(color="#ffffff", width=3),
-            name="Camera path",
-            hoverinfo="skip",
-        ))
-        # Current camera position
-        traces.append(go.Scatter3d(
-            x=[tx[-1]], y=[ty[-1]], z=[tz[-1]], mode="markers",
-            marker=dict(size=8, color="#00ff88", symbol="diamond"),
-            name="Camera (now)",
-            hovertemplate="Camera<br>x=%{x:.2f}<br>y=%{y:.2f}<br>z=%{z:.2f}<extra></extra>",
-        ))
+            traj_xz.append((float(p[0]), float(p[2])))
+    all_xz.extend(traj_xz)
 
-    # ── 3. Objects (verified + unverified) ────────────────────────────
+    # Object centres (triangulated or pseudo)
+    obj_xz = []
     for obj in objects:
-        tid = obj["track_id"]
-        verified = obj["verified"]
-        name, color = _cls_info(obj["cls"], wheel_cls, chock_cls)
-        conf = obj["conf_avg"]
-
         if obj["pos3d"] is not None:
             p = obj["pos3d"]
-            ox, oy, oz = float(p[0]), float(p[1]), float(p[2])
+            ox, oz = float(p[0]), float(p[2])
         else:
             ox, oz = _pseudo_xz(obj["cx_mean"], obj["cy_mean"], fw, fh)
-            oy = 0.0
+        obj_xz.append((ox, oz))
+        all_xz.append((ox, oz))
+
+    if not all_xz:
+        cv2.putText(canvas, "Waiting for 3-D data...",
+                    (180, _CANVAS_H // 2),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, (130, 130, 130), 2)
+        return canvas
+
+    xs = [p[0] for p in all_xz]
+    zs = [p[1] for p in all_xz]
+
+    # Robust bounds: clip outliers at 2nd / 98th percentile
+    if len(xs) > 20:
+        xs_s = sorted(xs)
+        zs_s = sorted(zs)
+        lo = int(len(xs_s) * 0.02)
+        hi = int(len(xs_s) * 0.98)
+        xs_s = xs_s[lo:hi + 1]
+        zs_s = zs_s[lo:hi + 1]
+    else:
+        xs_s, zs_s = xs, zs
+
+    pad_x = max((max(xs_s) - min(xs_s)) * 0.12, 0.3)
+    pad_z = max((max(zs_s) - min(zs_s)) * 0.12, 0.3)
+    x_min, x_max = min(xs_s) - pad_x, max(xs_s) + pad_x
+    z_min, z_max = min(zs_s) - pad_z, max(zs_s) + pad_z
+
+    # ── Grid ──────────────────────────────────────────────────────────
+    for i in range(6):
+        frac = i / 5.0
+        cx_g, _ = _w2c(x_min + frac * (x_max - x_min), z_min,
+                        x_min, x_max, z_min, z_max)
+        _, rz_g = _w2c(x_min, z_min + frac * (z_max - z_min),
+                        x_min, x_max, z_min, z_max)
+        cv2.line(canvas, (cx_g, _MARGIN), (cx_g, _MARGIN + _PLOT_H),
+                 _MAP_GRID, 1)
+        cv2.line(canvas, (_MARGIN, rz_g), (_MARGIN + _PLOT_W, rz_g),
+                 _MAP_GRID, 1)
+
+    # ── 1. Point cloud (environment) ─────────────────────────────────
+    for (px, py, pz, lbl) in cloud:
+        col, row = _w2c(px, pz, x_min, x_max, z_min, z_max)
+        if not (_MARGIN <= col < _MARGIN + _PLOT_W
+                and _MARGIN <= row < _MARGIN + _PLOT_H):
+            continue
+        if lbl < 0:
+            # Background point — tiny dark dot
+            canvas[row, col] = _CLOUD_BG_COLOR
+            # Cross-hair 1px to make it more visible
+            if col + 1 < _CANVAS_W:
+                canvas[row, col + 1] = _CLOUD_BG_COLOR
+            if row + 1 < _CANVAS_H:
+                canvas[row + 1, col] = _CLOUD_BG_COLOR
+        else:
+            # Object point — coloured 2×2 block
+            _, c = _cls_color_bgr(lbl, wheel_cls, chock_cls)
+            # Brighter tint for cloud points inside bbox
+            bright = tuple(min(255, int(ch * 0.6 + 80)) for ch in c)
+            for dr in range(3):
+                for dc in range(3):
+                    rr, cc = row + dr - 1, col + dc - 1
+                    if (_MARGIN <= cc < _MARGIN + _PLOT_W
+                            and _MARGIN <= rr < _MARGIN + _PLOT_H):
+                        canvas[rr, cc] = bright
+
+    # ── 2. Camera trajectory ──────────────────────────────────────────
+    tpts = [_w2c(tx, tz, x_min, x_max, z_min, z_max) for tx, tz in traj_xz]
+    if len(tpts) > 1:
+        for i in range(len(tpts) - 1):
+            cv2.line(canvas, tpts[i], tpts[i + 1], _MAP_TRAJ, 2, cv2.LINE_AA)
+    if tpts:
+        # Camera current pos — bright white circle with halo
+        cv2.circle(canvas, tpts[-1], 7, (255, 255, 255), -1, cv2.LINE_AA)
+        cv2.circle(canvas, tpts[-1], 10, (255, 255, 255), 1, cv2.LINE_AA)
+
+    # ── 3. Verified object markers ────────────────────────────────────
+    legend_entries: dict = {}
+    for obj, (ox, oz) in zip(objects, obj_xz):
+        col, row = _w2c(ox, oz, x_min, x_max, z_min, z_max)
+        name, color = _cls_color_bgr(obj["cls"], wheel_cls, chock_cls)
+        verified = obj["verified"]
+        tid = obj["track_id"]
+        conf = obj["conf_avg"]
 
         if verified:
-            sz = max(10, min(20, 10 + obj["obs"] // 3))
-            traces.append(go.Scatter3d(
-                x=[ox], y=[oy], z=[oz], mode="markers+text",
-                marker=dict(size=sz, color=color, opacity=0.95,
-                            line=dict(width=2, color="#ffffff")),
-                text=[f"{name}#{tid}"],
-                textposition="top center",
-                textfont=dict(size=10, color=color),
-                name=f"{name}#{tid} ({conf:.0%})",
-                hovertemplate=(
-                    f"{name} #{tid}<br>"
-                    f"conf: {conf:.1%}<br>"
-                    f"obs: {obj['obs']}<br>"
-                    "x=%{x:.2f} y=%{y:.2f} z=%{z:.2f}"
-                    "<extra>VERIFIED</extra>"
-                ),
-                showlegend=False,
-            ))
+            r = max(12, min(24, 12 + obj["obs"] // 3))
+            cv2.circle(canvas, (col, row), r, color, -1, cv2.LINE_AA)
+            cv2.circle(canvas, (col, row), r + 2, (255, 255, 255), 2, cv2.LINE_AA)
+            lbl_txt = f"{name}#{tid} {conf:.0%}"
+            cv2.putText(canvas, lbl_txt, (col + r + 5, row + 5),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1, cv2.LINE_AA)
+            legend_entries[name] = color
         else:
-            traces.append(go.Scatter3d(
-                x=[ox], y=[oy], z=[oz], mode="markers",
-                marker=dict(size=4, color="#666666", opacity=0.4,
-                            symbol="circle-open"),
-                name=f"?#{tid}",
-                hovertemplate=(
-                    f"{name} #{tid} (unverified)<br>"
-                    f"obs: {obj['obs']}<extra></extra>"
-                ),
-                showlegend=False,
-            ))
+            cv2.circle(canvas, (col, row), 5, (100, 100, 100), 1, cv2.LINE_AA)
 
-    # ── Build figure ──────────────────────────────────────────────────
+    # ── Plot border ───────────────────────────────────────────────────
+    cv2.rectangle(canvas, (_MARGIN, _MARGIN),
+                  (_MARGIN + _PLOT_W, _MARGIN + _PLOT_H), (80, 100, 130), 1)
+
+    # ── Title ─────────────────────────────────────────────────────────
+    title = "Semantic SLAM — 3D Environment"
+    n_pts = len(cloud)
     n_ver = sum(1 for o in objects if o["verified"])
-    fig = go.Figure(data=traces)
-    fig.update_layout(
-        scene=dict(
-            xaxis=dict(title="X", backgroundcolor="#0f172a",
-                       gridcolor="#1e3a5f", showspikes=False),
-            yaxis=dict(title="Y", backgroundcolor="#0f172a",
-                       gridcolor="#1e3a5f", showspikes=False),
-            zaxis=dict(title="Z (depth)", backgroundcolor="#0f172a",
-                       gridcolor="#1e3a5f", showspikes=False),
-            bgcolor="#0f172a",
-            aspectmode="data",
-        ),
-        paper_bgcolor="#0f172a",
-        font=dict(color="#e2e8f0"),
-        title=dict(
-            text=f"Semantic SLAM 3D | {len(cloud)} pts | "
-                 f"{len(traj_pts)} cam poses | {n_ver} verified",
-            font=dict(size=14),
-        ),
-        legend=dict(
-            bgcolor="rgba(15,23,42,0.8)",
-            bordercolor="#334155",
-            borderwidth=1,
-            font=dict(size=10),
-        ),
-        margin=dict(l=0, r=0, t=35, b=0),
-        height=550,
-    )
-    return fig
+    sub = f"  |  {n_pts} pts   {len(traj_xz)} cam poses   {n_ver} verified obj"
+    cv2.putText(canvas, title, (_MARGIN, 40),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.65, (230, 230, 230), 2, cv2.LINE_AA)
+    cv2.putText(canvas, sub, (_MARGIN, 60),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.38, (150, 160, 175), 1, cv2.LINE_AA)
+
+    # ── Axis labels ───────────────────────────────────────────────────
+    cv2.putText(canvas, "X", (_MARGIN + _PLOT_W + 5, _MARGIN + _PLOT_H + 5),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (150, 160, 175), 1)
+    cv2.putText(canvas, "Z (depth)", (_MARGIN - 5, _MARGIN - 8),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (150, 160, 175), 1)
+
+    # ── Legend strip ──────────────────────────────────────────────────
+    ly = _CANVAS_H - _LEGEND_H + 15
+    cv2.line(canvas, (_MARGIN, ly - 12), (_CANVAS_W - _MARGIN, ly - 12),
+             _MAP_GRID, 1)
+    lx = _MARGIN
+    # Cloud dot
+    cv2.circle(canvas, (lx + 6, ly + 8), 3, _CLOUD_BG_COLOR, -1)
+    cv2.putText(canvas, "Environment", (lx + 14, ly + 12),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (130, 140, 150), 1)
+    lx += 110
+    # Camera
+    cv2.circle(canvas, (lx + 6, ly + 8), 5, (255, 255, 255), -1)
+    cv2.putText(canvas, "Camera", (lx + 16, ly + 12),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (220, 220, 220), 1)
+    lx += 90
+    # Per-class entries
+    for lname, lcol in legend_entries.items():
+        cv2.circle(canvas, (lx + 6, ly + 8), 7, lcol, -1)
+        cv2.putText(canvas, lname, (lx + 18, ly + 12),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, lcol, 1)
+        lx += 90
+    # Unverified
+    cv2.circle(canvas, (lx + 6, ly + 8), 5, (100, 100, 100), 1)
+    cv2.putText(canvas, "Unverified", (lx + 16, ly + 12),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (100, 100, 100), 1)
+
+    return canvas
 
 
 # ══════════════════════════════════════════════
@@ -1068,7 +1079,6 @@ if uploaded_file is not None:
             col_vid, col_map = st.columns([3, 2])
             frame_display = col_vid.empty()
             map_display = col_map.empty() if slam_enabled else None
-            _slam_update_interval = 30  # update 3D plot every N processed frames
 
             tracker = SimpleTracker(iou_threshold=iou_track_thresh) if tracking_enabled else None
             slam = SemanticSLAM(min_observations=slam_min_obs, min_features=slam_min_feat) if slam_enabled else None
@@ -1100,12 +1110,12 @@ if uploaded_file is not None:
 
                     if processed_count % 15 == 0:
                         frame_display.image(cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB), channels="RGB", use_container_width=True)
-                    if (slam is not None and map_display is not None
-                            and processed_count % _slam_update_interval == 0
-                            and len(slam.point_cloud) > 0):
-                        map_display.plotly_chart(
-                            build_slam_plotly(slam, wheel_class_id, chock_class_id),
-                            use_container_width=True, key=f"slam_live_{processed_count}")
+                        if slam is not None and map_display is not None:
+                            _map_rgb = cv2.cvtColor(
+                                render_map_3d(slam, wheel_class_id, chock_class_id),
+                                cv2.COLOR_BGR2RGB,
+                            )
+                            map_display.image(_map_rgb, caption="SLAM · bird's-eye (live)", use_container_width=True)
 
                 if frame_idx % 10 == 0 or frame_idx == total_frames - 1:
                     progress = (frame_idx + 1) / total_frames
@@ -1135,23 +1145,17 @@ if uploaded_file is not None:
                 sm1.metric("Всего объектов (треков)", total_obj)
                 sm2.metric("Верифицированных", verified_obj)
 
-                # Render final interactive 3D map
-                final_fig = build_slam_plotly(slam, wheel_class_id, chock_class_id)
+                # Render final map and push to the live placeholder
+                map_img_bgr = render_map_3d(slam, wheel_class_id, chock_class_id)
+                map_img_rgb = cv2.cvtColor(map_img_bgr, cv2.COLOR_BGR2RGB)
                 if map_display is not None:
-                    map_display.plotly_chart(final_fig, use_container_width=True,
-                                            key="slam_final")
-                else:
-                    st.plotly_chart(final_fig, use_container_width=True,
-                                   key="slam_final_standalone")
+                    map_display.image(map_img_rgb, caption="SLAM · bird's-eye (финал)", use_container_width=True)
 
-                # Export as HTML for interactive viewing
                 import io as _io
-                html_buf = _io.StringIO()
-                final_fig.write_html(html_buf, include_plotlyjs="cdn")
-                st.download_button(
-                    "⬇️ Скачать 3D карту (HTML)",
-                    html_buf.getvalue(),
-                    "slam_3d_map.html", "text/html")
+                buf = _io.BytesIO()
+                Image.fromarray(map_img_rgb).save(buf, format="PNG")
+                st.download_button("⬇️ Скачать карту (PNG)", buf.getvalue(),
+                                   "slam_map.png", "image/png")
 
             st.markdown("### 🎬 Результат")
             h264_path = output_path.replace(".mp4", "_h264.mp4")
