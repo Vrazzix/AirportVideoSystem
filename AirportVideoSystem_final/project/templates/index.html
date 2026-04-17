@@ -1,0 +1,1046 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>✈️ Aircraft & Human Detection</title>
+<style>
+  /* ── Reset & base ─────────────────────────────────────────────── */
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:       #0f172a;
+    --bg2:      #1e293b;
+    --bg3:      #334155;
+    --accent:   #3b82f6;
+    --green:    #10b981;
+    --amber:    #f59e0b;
+    --red:      #ef4444;
+    --text:     #e2e8f0;
+    --text2:    #94a3b8;
+    --radius:   10px;
+    --sidebar-w: 310px;
+  }
+
+  body { background: var(--bg); color: var(--text);
+         font-family: 'Inter', 'Segoe UI', sans-serif; font-size: 14px;
+         display: flex; min-height: 100vh; overflow-x: hidden; }
+
+  /* ── Sidebar ──────────────────────────────────────────────────── */
+  #sidebar {
+    width: var(--sidebar-w); min-width: var(--sidebar-w);
+    background: linear-gradient(180deg, #0f172a, #1e293b);
+    border-right: 1px solid var(--bg3);
+    height: 100vh; overflow-y: auto; position: sticky; top: 0;
+    padding: 20px 16px; display: flex; flex-direction: column; gap: 6px;
+  }
+  #sidebar h2 { color: var(--text); font-size: 1rem; margin: 14px 0 6px;
+                display: flex; align-items: center; gap: 6px; }
+  #sidebar h2:first-child { margin-top: 0; }
+  .sidebar-section { border-top: 1px solid var(--bg3); padding-top: 10px; }
+
+  label { color: var(--text2); display: block; margin: 8px 0 2px; font-size: 12px; }
+  input[type=text], input[type=number], select {
+    width: 100%; padding: 6px 8px; border-radius: 6px;
+    border: 1px solid var(--bg3); background: var(--bg);
+    color: var(--text); font-size: 13px; outline: none;
+  }
+  input[type=text]:focus, input[type=number]:focus, select:focus {
+    border-color: var(--accent);
+  }
+  input[type=range] { width: 100%; accent-color: var(--accent); cursor: pointer; }
+  .range-row { display: flex; align-items: center; gap: 8px; }
+  .range-row span { min-width: 38px; text-align: right; color: var(--text); font-size: 12px; }
+
+  .toggle-row { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
+  .toggle-row label { margin: 0; flex: 1; color: var(--text2); }
+  input[type=checkbox] { accent-color: var(--accent); width: 15px; height: 15px; cursor: pointer; }
+
+  /* ── Main content ─────────────────────────────────────────────── */
+  #main {
+    flex: 1; padding: 28px 32px; overflow-y: auto;
+    display: flex; flex-direction: column; gap: 24px;
+  }
+
+  .page-title { font-size: 1.8rem; font-weight: 700;
+    background: linear-gradient(135deg, #60a5fa, #a78bfa);
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+  .page-sub   { color: var(--text2); font-size: 0.88rem; margin-top: 4px; }
+
+  /* ── Cards ────────────────────────────────────────────────────── */
+  .card { background: var(--bg2); border-radius: var(--radius);
+          border: 1px solid var(--bg3); padding: 20px; }
+  .card-title { font-size: 0.95rem; font-weight: 600; margin-bottom: 14px;
+                display: flex; align-items: center; gap: 8px; }
+
+  /* ── Model status ─────────────────────────────────────────────── */
+  .model-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+  .model-card { border-radius: 8px; padding: 12px;
+                background: linear-gradient(145deg, #1e293b, #0f172a);
+                border-left: 4px solid var(--bg3); }
+  .model-card.wheels { border-left-color: var(--amber); }
+  .model-card.person { border-left-color: var(--accent); }
+  .model-card.pose   { border-left-color: var(--green); }
+  .model-card strong { display: block; margin-bottom: 4px; }
+  .ok   { color: var(--green); font-size: 12px; }
+  .miss { color: var(--red);   font-size: 12px; }
+
+  /* ── Upload zone ──────────────────────────────────────────────── */
+  #drop-zone {
+    border: 2px dashed var(--bg3); border-radius: var(--radius);
+    padding: 48px 24px; text-align: center; cursor: pointer;
+    transition: border-color .2s, background .2s;
+  }
+  #drop-zone:hover, #drop-zone.drag-over {
+    border-color: var(--accent); background: rgba(59,130,246,.06);
+  }
+  #drop-zone .icon  { font-size: 3rem; }
+  #drop-zone .hint  { color: var(--text2); font-size: 0.85rem; margin-top: 6px; }
+  #file-input { display: none; }
+
+  /* ── Meta row ─────────────────────────────────────────────────── */
+  .meta-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+  .metric { background: var(--bg); border-radius: 8px; padding: 12px;
+            text-align: center; border: 1px solid var(--bg3); }
+  .metric .val { font-size: 1.3rem; font-weight: 700; color: var(--text); }
+  .metric .lbl { font-size: 11px; color: var(--text2); margin-top: 2px; }
+
+  /* ── Buttons ──────────────────────────────────────────────────── */
+  .btn {
+    padding: 10px 22px; border-radius: 8px; border: none; cursor: pointer;
+    font-size: 14px; font-weight: 600; transition: opacity .15s, transform .1s;
+  }
+  .btn:active { transform: scale(.97); }
+  .btn:disabled { opacity: .45; cursor: not-allowed; }
+  .btn-primary { background: var(--accent); color: #fff; width: 100%; padding: 14px; }
+  .btn-primary:hover:not(:disabled) { background: #2563eb; }
+  .btn-dl { background: var(--bg3); color: var(--text); font-size: 13px;
+            padding: 8px 16px; }
+  .btn-dl:hover { background: #475569; }
+  .btn-cancel { background: rgba(239,68,68,.15); color: #fca5a5;
+                border: 1px solid var(--red); font-size: 13px; padding: 6px 14px; }
+  .btn-cancel:hover:not(:disabled) { background: rgba(239,68,68,.3); }
+  .cancelled-banner { background: rgba(245,158,11,.12); border: 1px solid var(--amber);
+                       border-radius: var(--radius); padding: 12px 16px;
+                       color: #fcd34d; font-size: 13px; display: none; }
+
+  /* ── Progress ─────────────────────────────────────────────────── */
+  #section-progress { display: none; }
+  .progress-bar-wrap { background: var(--bg3); border-radius: 99px;
+                        height: 10px; overflow: hidden; margin: 8px 0; }
+  .progress-bar-fill { height: 100%; border-radius: 99px;
+    background: linear-gradient(90deg, var(--accent), var(--green));
+    transition: width .4s; width: 0%; }
+  @keyframes pulse {
+    0%,100% { opacity: 1; }
+    50%      { opacity: 0.45; }
+  }
+  .progress-info { display: flex; justify-content: space-between;
+                   font-size: 12px; color: var(--text2); margin-top: 4px; }
+
+  .processing-grid { display: grid; grid-template-columns: 3fr 2fr; gap: 20px; margin-top: 16px; }
+  #live-preview { width: 100%; border-radius: 8px; background: var(--bg);
+                  border: 1px solid var(--bg3); min-height: 200px; }
+
+  /* ── Results ──────────────────────────────────────────────────── */
+  #section-results { display: none; }
+  .results-stats { display: grid; grid-template-columns: repeat(3,1fr); gap: 12px; margin-bottom: 18px; }
+  .results-grid  { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  video { width: 100%; border-radius: 8px; background: #000; }
+  .dl-row { display: flex; gap: 10px; margin-top: 12px; flex-wrap: wrap; }
+
+  /* ── Error banner ─────────────────────────────────────────────── */
+  #error-box { display: none; background: rgba(239,68,68,.15);
+               border: 1px solid var(--red); border-radius: var(--radius);
+               padding: 14px 18px; color: #fca5a5; font-size: 13px; }
+
+  /* ── Model manager modal ─────────────────────────────────────── */
+  .modal-overlay {
+    display: none; position: fixed; inset: 0;
+    background: rgba(0,0,0,.65); z-index: 100;
+    align-items: center; justify-content: center;
+  }
+  .modal-overlay.open { display: flex; }
+  .modal {
+    background: var(--bg2); border: 1px solid var(--bg3);
+    border-radius: 14px; width: min(780px, 96vw);
+    max-height: 88vh; display: flex; flex-direction: column;
+    overflow: hidden;
+  }
+  .modal-header {
+    padding: 18px 22px; border-bottom: 1px solid var(--bg3);
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  .modal-header h3 { font-size: 1rem; font-weight: 700; }
+  .modal-body { padding: 20px 22px; overflow-y: auto; flex: 1; }
+  .modal-close { background: none; border: none; color: var(--text2);
+                 font-size: 1.4rem; cursor: pointer; line-height: 1; }
+  .modal-close:hover { color: var(--text); }
+
+  /* Upload zone for models */
+  .model-drop {
+    border: 2px dashed var(--bg3); border-radius: 8px;
+    padding: 28px; text-align: center; cursor: pointer;
+    transition: border-color .2s; margin-bottom: 18px;
+  }
+  .model-drop:hover, .model-drop.drag-over {
+    border-color: var(--accent); background: rgba(59,130,246,.05);
+  }
+  #model-file-input { display: none; }
+
+  /* Model list table */
+  .model-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .model-table th { text-align: left; color: var(--text2); font-weight: 500;
+                     padding: 6px 10px; border-bottom: 1px solid var(--bg3); }
+  .model-table td { padding: 8px 10px; border-bottom: 1px solid rgba(51,65,85,.5);
+                     vertical-align: middle; }
+  .model-table tr:last-child td { border-bottom: none; }
+  .model-table tr:hover td { background: rgba(59,130,246,.04); }
+
+  /* Format badge */
+  .fmt-badge {
+    display: inline-block; padding: 2px 8px; border-radius: 99px;
+    font-size: 11px; font-weight: 600; text-transform: uppercase;
+  }
+  .fmt-pytorch    { background: #ee4c2c22; color: #ee4c2c; border: 1px solid #ee4c2c44; }
+  .fmt-onnx       { background: #5a5fde22; color: #818cf8; border: 1px solid #5a5fde44; }
+  .fmt-openvino   { background: #0071c522; color: #38bdf8; border: 1px solid #0071c544; }
+  .fmt-tensorrt   { background: #76b90022; color: #86efac; border: 1px solid #76b90044; }
+  .fmt-tflite     { background: #ff6f0022; color: #fb923c; border: 1px solid #ff6f0044; }
+  .fmt-tensorflow { background: #ff6f0022; color: #fb923c; border: 1px solid #ff6f0044; }
+  .fmt-unknown    { background: var(--bg3); color: var(--text2); }
+
+  /* Assign buttons */
+  .assign-btns { display: flex; gap: 4px; flex-wrap: wrap; }
+  .btn-assign {
+    padding: 3px 8px; font-size: 11px; border-radius: 5px;
+    border: 1px solid var(--bg3); background: var(--bg);
+    color: var(--text2); cursor: pointer; transition: all .15s;
+  }
+  .btn-assign:hover { border-color: var(--accent); color: var(--accent); }
+  .btn-assign.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .btn-del-model {
+    padding: 3px 8px; font-size: 11px; border-radius: 5px;
+    border: 1px solid transparent; background: transparent;
+    color: var(--red); cursor: pointer; opacity: .6;
+  }
+  .btn-del-model:hover { opacity: 1; border-color: var(--red); }
+
+  /* Uploaded badge on sidebar */
+  .sidebar-model-info {
+    font-size: 11px; color: var(--text2);
+    display: flex; align-items: center; gap: 5px; margin-top: 2px;
+  }
+
+  /* Upload progress inside modal */
+  .upload-progress { margin-top: 10px; display: none; }
+  .upload-progress .bar-wrap { background: var(--bg3); border-radius: 99px;
+                                height: 6px; overflow: hidden; }
+  .upload-progress .bar-fill { height: 100%; background: var(--accent);
+                                transition: width .3s; width: 0%; }
+
+  /* ── Scrollbar ────────────────────────────────────────────────── */
+  ::-webkit-scrollbar { width: 6px; }
+  ::-webkit-scrollbar-track { background: var(--bg); }
+  ::-webkit-scrollbar-thumb { background: var(--bg3); border-radius: 3px; }
+</style>
+</head>
+<body>
+
+<!-- ═══════════════════════  SIDEBAR  ═══════════════════════════════════ -->
+<aside id="sidebar">
+  <h2>⚙️ Модели</h2>
+  <button class="btn btn-dl" style="width:100%;margin-bottom:8px;"
+          onclick="openModelManager()">📂 Управление моделями</button>
+
+  <label>🛞 Комбо (колёса+колодки)</label>
+  <input type="text" id="model_wheels"
+    value="C:\Users\shche\Desktop\Application_for_models\models\BestBoots_v2.pt">
+  <div class="sidebar-model-info" id="info_model_wheels"></div>
+
+  <label>🧑 Люди</label>
+  <input type="text" id="model_person"
+    value="C:\Users\shche\Desktop\Application_for_models\models\person.pt">
+  <div class="sidebar-model-info" id="info_model_person"></div>
+
+  <label>🦴 Поза (MPII-16)</label>
+  <input type="text" id="model_pose"
+    value="C:\Users\shche\Desktop\Application_for_models\models\BestPose.pt">
+  <div class="sidebar-model-info" id="info_model_pose"></div>
+
+  <div class="sidebar-section">
+  <h2>🎭 Активные модули</h2>
+  <div class="toggle-row"><input type="checkbox" id="use_wheels" checked>
+    <label for="use_wheels">🛞 Колёса и колодки</label></div>
+  <div class="toggle-row"><input type="checkbox" id="use_person" checked>
+    <label for="use_person">🧑 Детекция людей</label></div>
+  <div class="toggle-row"><input type="checkbox" id="use_pose" checked>
+    <label for="use_pose">🦴 Поза</label></div>
+  </div>
+
+  <div class="sidebar-section">
+  <h2>🏷️ ID классов</h2>
+  <label>ID «Колесо»</label>
+  <input type="number" id="wheel_class" value="1" min="0" max="20">
+  <label>ID «Колодка»</label>
+  <input type="number" id="chock_class" value="0" min="0" max="20">
+  </div>
+
+  <div class="sidebar-section">
+  <h2>🎛️ Пороги</h2>
+  <label>Conf — колёса/колодки: <span id="lbl_conf_wheels">0.15</span></label>
+  <div class="range-row">
+    <input type="range" id="conf_wheels" min="0.05" max="1" step="0.05" value="0.15"
+      oninput="document.getElementById('lbl_conf_wheels').textContent=this.value">
+  </div>
+  <label>Conf — люди: <span id="lbl_conf_person">0.50</span></label>
+  <div class="range-row">
+    <input type="range" id="conf_person" min="0.1" max="1" step="0.05" value="0.5"
+      oninput="document.getElementById('lbl_conf_person').textContent=this.value">
+  </div>
+  <label>Conf — ключевые точки: <span id="lbl_conf_pose">0.50</span></label>
+  <div class="range-row">
+    <input type="range" id="conf_pose_kpt" min="0.1" max="1" step="0.05" value="0.5"
+      oninput="document.getElementById('lbl_conf_pose').textContent=this.value">
+  </div>
+  <label>Размер инференса</label>
+  <select id="imgsz">
+    <option value="640">640</option>
+    <option value="960">960</option>
+    <option value="1280" selected>1280</option>
+  </select>
+  <label>Каждый N-й кадр: <span id="lbl_every_n">1</span></label>
+  <input type="range" id="every_n" min="1" max="10" step="1" value="1"
+    oninput="document.getElementById('lbl_every_n').textContent=this.value">
+  </div>
+
+  <div class="sidebar-section">
+  <h2>🔍 Фильтрация FP</h2>
+  <div class="toggle-row"><input type="checkbox" id="filter_enabled" checked>
+    <label for="filter_enabled">Включить фильтрацию</label></div>
+
+  <label>Мин. площадь Wheel: <span id="lbl_wheel_min_area">3000</span></label>
+  <input type="range" id="wheel_min_area" min="500" max="20000" step="500" value="3000"
+    oninput="document.getElementById('lbl_wheel_min_area').textContent=this.value">
+
+  <label>Макс. aspect Wheel: <span id="lbl_wheel_max_asp">2.5</span></label>
+  <input type="range" id="wheel_max_asp" min="1" max="5" step="0.1" value="2.5"
+    oninput="document.getElementById('lbl_wheel_max_asp').textContent=this.value">
+
+  <label>Мин. aspect Wheel: <span id="lbl_wheel_min_asp">0.4</span></label>
+  <input type="range" id="wheel_min_asp" min="0.1" max="1" step="0.05" value="0.4"
+    oninput="document.getElementById('lbl_wheel_min_asp').textContent=this.value">
+
+  <label>Мин. площадь Chock: <span id="lbl_chock_min_area">1000</span></label>
+  <input type="range" id="chock_min_area" min="200" max="10000" step="200" value="1000"
+    oninput="document.getElementById('lbl_chock_min_area').textContent=this.value">
+
+  <label>Макс. площадь Chock: <span id="lbl_chock_max_area">40000</span></label>
+  <input type="range" id="chock_max_area" min="5000" max="200000" step="5000" value="40000"
+    oninput="document.getElementById('lbl_chock_max_area').textContent=this.value">
+
+  <label>Макс. aspect Chock: <span id="lbl_chock_max_asp">4.0</span></label>
+  <input type="range" id="chock_max_asp" min="1" max="8" step="0.5" value="4"
+    oninput="document.getElementById('lbl_chock_max_asp').textContent=this.value">
+  </div>
+
+  <div class="sidebar-section">
+  <h2>🔗 Трекинг</h2>
+  <div class="toggle-row"><input type="checkbox" id="tracking_enabled" checked>
+    <label for="tracking_enabled">IoU-трекинг</label></div>
+  <label>IoU порог: <span id="lbl_iou_thresh">0.30</span></label>
+  <input type="range" id="iou_thresh" min="0.1" max="0.8" step="0.05" value="0.3"
+    oninput="document.getElementById('lbl_iou_thresh').textContent=parseFloat(this.value).toFixed(2)">
+  </div>
+
+  <div class="sidebar-section">
+  <h2>📊 Визуализация</h2>
+  <label>Толщина линий: <span id="lbl_line_thickness">2</span></label>
+  <input type="range" id="line_thickness" min="1" max="5" step="1" value="2"
+    oninput="document.getElementById('lbl_line_thickness').textContent=this.value">
+  <label>Размер шрифта: <span id="lbl_font_scale">0.6</span></label>
+  <input type="range" id="font_scale" min="0.3" max="1.5" step="0.1" value="0.6"
+    oninput="document.getElementById('lbl_font_scale').textContent=parseFloat(this.value).toFixed(1)">
+  <div class="toggle-row"><input type="checkbox" id="show_status_bar" checked>
+    <label for="show_status_bar">Статус-бар колодок</label></div>
+  <div class="toggle-row"><input type="checkbox" id="show_track_ids" checked>
+    <label for="show_track_ids">ID трекинга</label></div>
+  </div>
+</aside>
+
+<!-- ═══════════════════════  MAIN  ══════════════════════════════════════ -->
+<main id="main">
+  <div>
+    <div class="page-title">✈️ Aircraft & Human Detection System</div>
+    <div class="page-sub">Детекция колёс/колодок · Люди · Поза · Трекинг
+      {% if has_cuda %} · <span style="color:var(--green)">CUDA</span>{% else %} · <span style="color:var(--amber)">CPU</span>{% endif %}
+    </div>
+  </div>
+
+  <!-- Model status -->
+  <div class="card">
+    <div class="card-title">📦 Статус моделей</div>
+    <div class="model-grid" id="model-status-grid">
+      <div class="model-card wheels">
+        <strong>🛞 Колёса+колодки</strong>
+        <span id="ms-wheels" class="miss">проверка...</span>
+      </div>
+      <div class="model-card person">
+        <strong>🧑 Люди</strong>
+        <span id="ms-person" class="miss">проверка...</span>
+      </div>
+      <div class="model-card pose">
+        <strong>🦴 Поза MPII-16</strong>
+        <span id="ms-pose" class="miss">проверка...</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Upload / RTSP -->
+  <div class="card">
+    <div class="card-title">🎬 Источник видео</div>
+
+    <!-- Tabs -->
+    <div style="display:flex;gap:8px;margin-bottom:14px;">
+      <button id="tab-file" class="btn btn-primary" style="flex:1"
+        onclick="switchSourceTab('file')">📁 Видеофайл</button>
+      <button id="tab-rtsp" class="btn" style="flex:1;background:var(--bg3)"
+        onclick="switchSourceTab('rtsp')">📡 RTSP камера</button>
+    </div>
+
+    <!-- File tab -->
+    <div id="source-file">
+      <div id="drop-zone" onclick="document.getElementById('file-input').click()">
+        <div class="icon">🎥</div>
+        <div style="font-size:1rem;margin-top:8px;font-weight:600;">
+          Перетащите видео или нажмите для выбора
+        </div>
+        <div class="hint">MP4, AVI, MOV, MKV, WMV · до 2 ГБ</div>
+      </div>
+      <input type="file" id="file-input" accept=".mp4,.avi,.mov,.mkv,.wmv">
+    </div>
+
+    <!-- RTSP tab -->
+    <div id="source-rtsp" style="display:none">
+      <div style="margin-bottom:10px;color:var(--text2);font-size:0.85rem;">
+        Введите RTSP URL камеры. Сервер подключится и начнёт обработку живого потока.
+      </div>
+      <input type="text" id="rtsp-url" placeholder="rtsp://admin:pass@192.168.1.10:554/stream1"
+        style="width:100%;box-sizing:border-box;padding:10px 12px;border-radius:8px;
+               border:1.5px solid var(--border);background:var(--bg2);color:var(--text1);
+               font-size:0.9rem;margin-bottom:10px;">
+      <div style="display:flex;gap:8px;flex-wrap:wrap;font-size:0.78rem;color:var(--text2);margin-bottom:12px;">
+        <span>Примеры:</span>
+        <code style="cursor:pointer;color:var(--accent)"
+          onclick="document.getElementById('rtsp-url').value='rtsp://admin:admin@192.168.1.10:554/cam/realmonitor?channel=1&subtype=0'">
+          Dahua/Hikvision</code>
+        <code style="cursor:pointer;color:var(--accent)"
+          onclick="document.getElementById('rtsp-url').value='rtsp://192.168.1.10:8554/stream'">
+          Generic</code>
+      </div>
+      <button class="btn btn-primary" onclick="connectRTSP()" style="width:100%">
+        📡 Подключиться к камере
+      </button>
+    </div>
+  </div>
+
+  <!-- Video meta (hidden until upload) -->
+  <div class="card" id="section-meta" style="display:none">
+    <div class="card-title">📐 Информация о видео</div>
+    <div class="meta-grid">
+      <div class="metric"><div class="val" id="m-res">—</div><div class="lbl">Разрешение</div></div>
+      <div class="metric"><div class="val" id="m-frames">—</div><div class="lbl">Кадров</div></div>
+      <div class="metric"><div class="val" id="m-dur">—</div><div class="lbl">Длительность</div></div>
+      <div class="metric"><div class="val" id="m-fps">—</div><div class="lbl">FPS</div></div>
+    </div>
+    <br>
+    <button class="btn btn-primary" id="btn-start" onclick="startProcessing()">
+      🚀 Запустить обработку
+    </button>
+  </div>
+
+  <!-- Error -->
+  <div id="error-box"></div>
+
+  <!-- Cancelled -->
+  <div id="cancelled-banner" class="cancelled-banner">
+    ⚠️ Обработка отменена. Частичные файлы удалены. Загрузите видео заново для повторного запуска.
+  </div>
+
+  <!-- Progress -->
+  <div class="card" id="section-progress">
+    <div class="card-title" style="justify-content:space-between;">
+      <span>⚙️ Обработка...</span>
+      <button class="btn btn-cancel" id="btn-cancel" onclick="cancelProcessing()">
+        ✕ Отменить
+      </button>
+    </div>
+    <div class="progress-bar-wrap">
+      <div class="progress-bar-fill" id="progress-fill"></div>
+    </div>
+    <div class="progress-info">
+      <span id="prog-text">Кадр 0 / 0</span>
+      <span id="prog-fps">0 fps</span>
+      <span id="prog-eta">ETA: —</span>
+    </div>
+    <div class="processing-grid">
+      <div>
+        <div style="font-size:12px;color:var(--text2);margin-bottom:6px;">Предпросмотр</div>
+        <img id="live-preview" src="" alt="preview">
+      </div>
+      <div>
+        <div style="font-size:12px;color:var(--text2);margin-bottom:6px;">Статистика</div>
+        <div id="live-stats" style="font-size:12px;color:var(--text2);line-height:1.8;">
+          Обработано: —<br>Скорость: — fps
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Results -->
+  <div id="section-results">
+    <div class="card">
+      <div class="card-title">📊 Результаты</div>
+      <div class="results-stats">
+        <div class="metric"><div class="val" id="r-time">—</div><div class="lbl">Время</div></div>
+        <div class="metric"><div class="val" id="r-frames">—</div><div class="lbl">Кадров</div></div>
+        <div class="metric"><div class="val" id="r-fps">—</div><div class="lbl">FPS обработки</div></div>
+      </div>
+    </div>
+
+    <div style="margin-top:20px;">
+      <div class="card">
+        <div class="card-title">🎬 Результирующее видео</div>
+        <video id="result-video" controls></video>
+        <div class="dl-row">
+          <button class="btn btn-dl" id="btn-dl-video">⬇️ Скачать видео</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</main>
+
+<!-- ═══════════════════════  MODEL MANAGER MODAL  ═══════════════════════ -->
+<div class="modal-overlay" id="modal-models">
+  <div class="modal">
+    <div class="modal-header">
+      <h3>📂 Управление моделями</h3>
+      <button class="modal-close" onclick="closeModelManager()">✕</button>
+    </div>
+    <div class="modal-body">
+
+      <!-- Upload zone -->
+      <div class="model-drop" id="model-drop"
+           onclick="document.getElementById('model-file-input').click()">
+        <div style="font-size:2rem;">⬆️</div>
+        <div style="font-weight:600;margin-top:6px;">
+          Перетащите файлы моделей или нажмите для выбора
+        </div>
+        <div style="font-size:12px;color:var(--text2);margin-top:4px;">
+          Одиночные: <b>.pt</b> · <b>.onnx</b> · <b>.engine</b> · <b>.tflite</b><br>
+          OpenVINO IR: загрузите <b>.xml</b> + <b>.bin</b> вместе (выберите оба файла)
+        </div>
+      </div>
+      <input type="file" id="model-file-input" multiple
+             accept=".pt,.onnx,.engine,.xml,.bin,.tflite,.pb">
+
+      <div class="upload-progress" id="upload-progress">
+        <div class="bar-wrap"><div class="bar-fill" id="upload-bar"></div></div>
+        <div style="font-size:12px;color:var(--text2);margin-top:4px;" id="upload-status">
+          Загрузка...
+        </div>
+      </div>
+
+      <!-- Model list -->
+      <div style="font-size:12px;color:var(--text2);margin-bottom:8px;margin-top:4px;">
+        Нажмите <b>Назначить</b> чтобы выбрать модель для нужного слота.
+        Модели из папки <code>uploaded_models/</code> можно удалить.
+      </div>
+      <table class="model-table">
+        <thead>
+          <tr>
+            <th>Имя файла</th>
+            <th>Формат</th>
+            <th>Размер</th>
+            <th>Назначить</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody id="model-table-body">
+          <tr><td colspan="5" style="color:var(--text2);text-align:center;padding:20px;">
+            Загрузка списка...
+          </td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════  JS  ════════════════════════════════════════ -->
+<script>
+let currentJobId = null;
+let previewInterval = null;
+let sseSource = null;
+
+// ── Drag & drop ───────────────────────────────────────────────────────────
+const dropZone = document.getElementById('drop-zone');
+const fileInput = document.getElementById('file-input');
+
+dropZone.addEventListener('dragover',  e => { e.preventDefault(); dropZone.classList.add('drag-over'); });
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+dropZone.addEventListener('drop', e => {
+  e.preventDefault();
+  dropZone.classList.remove('drag-over');
+  if (e.dataTransfer.files[0]) handleFile(e.dataTransfer.files[0]);
+});
+fileInput.addEventListener('change', () => {
+  if (fileInput.files[0]) handleFile(fileInput.files[0]);
+});
+
+async function handleFile(file) {
+  showError('');
+  document.getElementById('section-meta').style.display       = 'none';
+  document.getElementById('section-progress').style.display   = 'none';
+  document.getElementById('section-results').style.display    = 'none';
+  document.getElementById('cancelled-banner').style.display   = 'none';
+
+  dropZone.innerHTML = `<div class="icon">⏳</div>
+    <div style="margin-top:8px;font-weight:600;">Загрузка ${file.name}...</div>
+    <div class="hint">${(file.size/1024/1024).toFixed(1)} МБ</div>`;
+
+  const fd = new FormData();
+  fd.append('video', file);
+
+  try {
+    const res  = await fetch('/upload', { method: 'POST', body: fd });
+    const data = await res.json();
+    if (data.error) { showError(data.error); resetDropZone(); return; }
+
+    currentJobId = data.job_id;
+    const m = data.meta;
+    document.getElementById('m-res').textContent    = `${m.width}×${m.height}`;
+    document.getElementById('m-frames').textContent = m.frames;
+    document.getElementById('m-dur').textContent    = `${m.duration} сек`;
+    document.getElementById('m-fps').textContent    = m.fps;
+
+    document.getElementById('section-meta').style.display = 'block';
+    dropZone.innerHTML = `<div class="icon">✅</div>
+      <div style="margin-top:8px;font-weight:600;">${file.name}</div>
+      <div class="hint">${(file.size/1024/1024).toFixed(1)} МБ · ${m.width}×${m.height} · ${m.duration}с</div>`;
+  } catch(e) {
+    showError('Ошибка загрузки: ' + e.message);
+    resetDropZone();
+  }
+}
+
+function resetDropZone() {
+  dropZone.innerHTML = `<div class="icon">🎥</div>
+    <div style="font-size:1rem;margin-top:8px;font-weight:600;">Перетащите видео или нажмите для выбора</div>
+    <div class="hint">MP4, AVI, MOV, MKV, WMV · до 2 ГБ</div>`;
+}
+
+// ── Collect settings ──────────────────────────────────────────────────────
+function collectCfg() {
+  const v = id => document.getElementById(id).value;
+  const c = id => document.getElementById(id).checked;
+  return {
+    model_wheels:      v('model_wheels'),
+    model_person:      v('model_person'),
+    model_pose:        v('model_pose'),
+    use_wheels:        c('use_wheels'),
+    use_person:        c('use_person'),
+    use_pose:          c('use_pose'),
+    wheel_class:       +v('wheel_class'),
+    chock_class:       +v('chock_class'),
+    conf_wheels:       +v('conf_wheels'),
+    conf_person:       +v('conf_person'),
+    conf_pose_kpt:     +v('conf_pose_kpt'),
+    imgsz:             +v('imgsz'),
+    every_n:           +v('every_n'),
+    filter_enabled:    c('filter_enabled'),
+    wheel_min_area:    +v('wheel_min_area'),
+    wheel_max_asp:     +v('wheel_max_asp'),
+    wheel_min_asp:     +v('wheel_min_asp'),
+    chock_min_area:    +v('chock_min_area'),
+    chock_max_area:    +v('chock_max_area'),
+    chock_max_asp:     +v('chock_max_asp'),
+    tracking_enabled:  c('tracking_enabled'),
+    iou_thresh:        +v('iou_thresh'),
+    line_thickness:    +v('line_thickness'),
+    font_scale:        +v('font_scale'),
+    show_status_bar:   c('show_status_bar'),
+    show_track_ids:    c('show_track_ids'),
+  };
+}
+
+// ── Source tab switch ─────────────────────────────────────────────────────
+function switchSourceTab(tab) {
+  document.getElementById('source-file').style.display = tab === 'file' ? '' : 'none';
+  document.getElementById('source-rtsp').style.display = tab === 'rtsp' ? '' : 'none';
+  document.getElementById('tab-file').style.background = tab === 'file' ? 'var(--accent)' : 'var(--bg3)';
+  document.getElementById('tab-rtsp').style.background = tab === 'rtsp' ? 'var(--accent)' : 'var(--bg3)';
+}
+
+// ── Connect RTSP camera ───────────────────────────────────────────────────
+async function connectRTSP() {
+  const url = document.getElementById('rtsp-url').value.trim();
+  if (!url) { showError('Введите RTSP URL'); return; }
+
+  showError('');
+  const btn = document.querySelector('#source-rtsp button');
+  btn.disabled = true;
+  btn.textContent = 'Подключение...';
+
+  try {
+    const res = await fetch('/rtsp/connect', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({url})
+    });
+    const data = await res.json();
+    if (!res.ok) { showError(data.error || 'Ошибка подключения'); return; }
+
+    currentJobId = data.job_id;
+
+    // Show live meta
+    document.getElementById('section-meta').style.display = '';
+    document.getElementById('m-res').textContent   = 'Live';
+    document.getElementById('m-frames').textContent = '∞';
+    document.getElementById('m-dur').textContent   = 'Live';
+    document.getElementById('m-fps').textContent   = 'RTSP';
+
+    // Auto-start immediately for live stream
+    await startProcessing();
+  } catch(e) {
+    showError('Ошибка: ' + e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '📡 Подключиться к камере';
+  }
+}
+
+// ── Start processing ──────────────────────────────────────────────────────
+async function startProcessing() {
+  if (!currentJobId) return;
+  const btn = document.getElementById('btn-start');
+  btn.disabled = true;
+  btn.textContent = '⏳ Запуск...';
+  showError('');
+
+  const cfg = collectCfg();
+  const res = await fetch(`/process/${currentJobId}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(cfg)
+  });
+  const data = await res.json();
+  if (data.error) { showError(data.error); btn.disabled = false; return; }
+
+  document.getElementById('section-progress').style.display   = 'block';
+  document.getElementById('section-results').style.display    = 'none';
+  document.getElementById('cancelled-banner').style.display   = 'none';
+  const cancelBtn = document.getElementById('btn-cancel');
+  cancelBtn.disabled    = false;
+  cancelBtn.textContent = '✕ Отменить';
+  btn.textContent = '⏳ Обработка...';
+
+  // Live preview polling
+  previewInterval = setInterval(() => {
+    document.getElementById('live-preview').src =
+      `/frame/${currentJobId}?t=${Date.now()}`;
+  }, 800);
+
+  // SSE progress
+  if (sseSource) sseSource.close();
+  sseSource = new EventSource(`/stream/${currentJobId}`);
+  sseSource.onmessage = e => handleProgress(JSON.parse(e.data));
+  sseSource.onerror   = () => sseSource.close();
+}
+
+function handleProgress(d) {
+  const isLive = d.total === -1;
+  const pct    = isLive ? 100 : (d.total > 0 ? (d.frame / d.total * 100) : 0);
+
+  // Для live-потока — пульсирующий прогресс-бар вместо процента
+  const fill = document.getElementById('progress-fill');
+  fill.style.width = pct + '%';
+  fill.style.animation = isLive ? 'pulse 1.5s ease-in-out infinite' : 'none';
+
+  document.getElementById('prog-text').textContent = isLive
+    ? `Live · обработано кадров: ${d.frame}`
+    : `Кадр ${d.frame} / ${d.total}  (${pct.toFixed(1)}%)`;
+
+  document.getElementById('prog-fps').textContent = `${d.fps_proc} fps`;
+  document.getElementById('prog-eta').textContent = isLive
+    ? '📡 Live stream'
+    : (d.eta > 0 ? `ETA: ${fmtSec(d.eta)}` : '');
+
+  document.getElementById('live-stats').innerHTML =
+    `Обработано: <b>${d.processed}</b> кадров&nbsp;&nbsp;Скорость: <b>${d.fps_proc}</b> fps` +
+    (d.status === 'reconnecting' ? '&nbsp;&nbsp;<span style="color:var(--amber)">⚠ переподключение...</span>' : '');
+
+  if (d.status === 'done')      showResults(d.result);
+  if (d.status === 'cancelled') showCancelled();
+  if (d.status === 'error')     { showError(d.error); stopPolling(); }
+}
+
+async function cancelProcessing() {
+  if (!currentJobId) return;
+  const btn = document.getElementById('btn-cancel');
+  btn.disabled = true;
+  btn.textContent = '⏳ Отмена...';
+  try {
+    await fetch(`/cancel/${currentJobId}`, { method: 'POST' });
+  } catch(e) { /* SSE will report the status change */ }
+}
+
+function showCancelled() {
+  stopPolling();
+  document.getElementById('section-progress').style.display = 'none';
+  document.getElementById('cancelled-banner').style.display = 'block';
+  const startBtn = document.getElementById('btn-start');
+  startBtn.textContent = '🚀 Запустить обработку';
+  startBtn.disabled    = false;
+  currentJobId = null;
+}
+
+function showResults(r) {
+  stopPolling();
+  document.getElementById('section-progress').style.display = 'none';
+  document.getElementById('section-results').style.display  = 'block';
+  document.getElementById('btn-start').textContent = '🚀 Запустить снова';
+  document.getElementById('btn-start').disabled    = false;
+
+  const t = r.timing;
+  document.getElementById('r-time').textContent   = t.total_sec + ' сек';
+  document.getElementById('r-frames').textContent = t.frames_out;
+  document.getElementById('r-fps').textContent    = t.avg_fps;
+
+  // Video player
+  const vid = document.getElementById('result-video');
+  vid.src = `/video/${currentJobId}?t=${Date.now()}`;
+  document.getElementById('btn-dl-video').onclick =
+    () => window.location = `/download/${currentJobId}/video`;
+
+}
+
+function stopPolling() {
+  clearInterval(previewInterval);
+  if (sseSource) { sseSource.close(); sseSource = null; }
+}
+
+function showError(msg) {
+  const el = document.getElementById('error-box');
+  el.style.display = msg ? 'block' : 'none';
+  el.textContent   = msg;
+}
+
+function fmtSec(s) {
+  if (s < 60)   return s + ' сек';
+  if (s < 3600) return Math.floor(s/60) + ' мин ' + (s%60) + ' сек';
+  return Math.floor(s/3600) + 'ч ' + Math.floor((s%3600)/60) + ' мин';
+}
+
+// ── Model status (sidebar info badges) ───────────────────────────────────
+const FMT_LABELS = {
+  pytorch: 'PyTorch', onnx: 'ONNX', openvino: 'OpenVINO',
+  tensorrt: 'TensorRT', tflite: 'TFLite', tensorflow: 'TF', unknown: '?'
+};
+let _allModels = [];
+
+function updateModelStatus() {
+  const slots = [
+    { inputId: 'model_wheels', infoId: 'info_model_wheels', msId: 'ms-wheels' },
+    { inputId: 'model_person', infoId: 'info_model_person', msId: 'ms-person' },
+    { inputId: 'model_pose',   infoId: 'info_model_pose',   msId: 'ms-pose'   },
+  ];
+  slots.forEach(s => {
+    const path = document.getElementById(s.inputId).value.trim();
+    const name = path.split(/[\\/]/).pop() || '—';
+    const msEl = document.getElementById(s.msId);
+    msEl.textContent = name;
+
+    // find in loaded model list for format info
+    const found = _allModels.find(m => m.path === path || m.name === name);
+    const infoEl = document.getElementById(s.infoId);
+    if (found) {
+      const lbl = FMT_LABELS[found.format] || found.format;
+      infoEl.innerHTML = `<span class="fmt-badge fmt-${found.format}">${lbl}</span>
+                          <span>${found.size_mb} МБ</span>`;
+      msEl.className = 'ok';
+    } else {
+      infoEl.innerHTML = '';
+      const validExt = /\.(pt|onnx|engine|tflite|pb)$/i.test(name) || !name.includes('.');
+      msEl.className = validExt ? 'ok' : 'miss';
+    }
+  });
+}
+
+['model_wheels','model_person','model_pose'].forEach(id =>
+  document.getElementById(id).addEventListener('input', updateModelStatus));
+
+
+// ── Model Manager ─────────────────────────────────────────────────────────
+async function openModelManager() {
+  document.getElementById('modal-models').classList.add('open');
+  await refreshModelList();
+}
+function closeModelManager() {
+  document.getElementById('modal-models').classList.remove('open');
+}
+// Close on overlay click
+document.getElementById('modal-models').addEventListener('click', e => {
+  if (e.target === e.currentTarget) closeModelManager();
+});
+
+async function refreshModelList() {
+  const tbody = document.getElementById('model-table-body');
+  tbody.innerHTML = '<tr><td colspan="5" style="color:var(--text2);text-align:center;padding:20px;">Загрузка...</td></tr>';
+  try {
+    const res  = await fetch('/models/list');
+    const data = await res.json();
+    _allModels = data.models || [];
+    renderModelTable(_allModels);
+    updateModelStatus();
+  } catch(e) {
+    tbody.innerHTML = `<tr><td colspan="5" style="color:var(--red)">Ошибка: ${e.message}</td></tr>`;
+  }
+}
+
+function renderModelTable(models) {
+  const tbody = document.getElementById('model-table-body');
+  if (!models.length) {
+    tbody.innerHTML = '<tr><td colspan="5" style="color:var(--text2);text-align:center;padding:20px;">Нет доступных моделей. Загрузите файлы выше.</td></tr>';
+    return;
+  }
+
+  // Current selections
+  const curWheels = document.getElementById('model_wheels').value;
+  const curPerson = document.getElementById('model_person').value;
+  const curPose   = document.getElementById('model_pose').value;
+
+  tbody.innerHTML = models.map(m => {
+    const lbl = FMT_LABELS[m.format] || m.format;
+    const isUpload = m.path.includes('uploaded_models');
+
+    const wActive = m.path === curWheels ? 'active' : '';
+    const pActive = m.path === curPerson ? 'active' : '';
+    const oActive = m.path === curPose   ? 'active' : '';
+
+    const delBtn = isUpload
+      ? `<button class="btn-del-model" onclick="deleteModel('${esc(m.path)}', this)" title="Удалить">🗑</button>`
+      : '<span style="color:var(--bg3);font-size:11px;">системная</span>';
+
+    return `<tr>
+      <td style="font-size:12px;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"
+          title="${esc(m.path)}">${m.name}</td>
+      <td><span class="fmt-badge fmt-${m.format}">${lbl}</span></td>
+      <td style="color:var(--text2);font-size:12px;">${m.size_mb} МБ</td>
+      <td>
+        <div class="assign-btns">
+          <button class="btn-assign ${wActive}" onclick="assignModel('wheels','${esc(m.path)}')">🛞 Колёса</button>
+          <button class="btn-assign ${pActive}" onclick="assignModel('person','${esc(m.path)}')">🧑 Люди</button>
+          <button class="btn-assign ${oActive}" onclick="assignModel('pose','${esc(m.path)}')">🦴 Поза</button>
+        </div>
+      </td>
+      <td>${delBtn}</td>
+    </tr>`;
+  }).join('');
+}
+
+function esc(s) { return s.replace(/\\/g, '\\\\').replace(/'/g, "\\'"); }
+
+function assignModel(slot, path) {
+  const map = { wheels: 'model_wheels', person: 'model_person', pose: 'model_pose' };
+  document.getElementById(map[slot]).value = path;
+  updateModelStatus();
+  // Re-render table to update active buttons
+  renderModelTable(_allModels);
+}
+
+async function deleteModel(path, btn) {
+  if (!confirm(`Удалить модель?\n${path}`)) return;
+  btn.disabled = true;
+  const res  = await fetch('/models/delete', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path })
+  });
+  const data = await res.json();
+  if (data.error) { alert('Ошибка: ' + data.error); btn.disabled = false; return; }
+  await refreshModelList();
+}
+
+// ── Model file upload ─────────────────────────────────────────────────────
+const modelDrop = document.getElementById('model-drop');
+const modelFileInput = document.getElementById('model-file-input');
+
+modelDrop.addEventListener('dragover',  e => { e.preventDefault(); modelDrop.classList.add('drag-over'); });
+modelDrop.addEventListener('dragleave', () => modelDrop.classList.remove('drag-over'));
+modelDrop.addEventListener('drop', e => {
+  e.preventDefault();
+  modelDrop.classList.remove('drag-over');
+  if (e.dataTransfer.files.length) uploadModels(e.dataTransfer.files);
+});
+modelFileInput.addEventListener('change', () => {
+  if (modelFileInput.files.length) uploadModels(modelFileInput.files);
+  modelFileInput.value = '';
+});
+
+async function uploadModels(files) {
+  const prog    = document.getElementById('upload-progress');
+  const bar     = document.getElementById('upload-bar');
+  const status  = document.getElementById('upload-status');
+
+  prog.style.display = 'block';
+  bar.style.width    = '0%';
+  status.textContent = `Загрузка ${files.length} файл(ов)...`;
+
+  const fd = new FormData();
+  for (const f of files) fd.append('files', f);
+
+  try {
+    // Fake progress animation
+    let fakeP = 0;
+    const ticker = setInterval(() => {
+      fakeP = Math.min(fakeP + 8, 85);
+      bar.style.width = fakeP + '%';
+    }, 150);
+
+    const res  = await fetch('/models/upload', { method: 'POST', body: fd });
+    clearInterval(ticker);
+    bar.style.width = '100%';
+
+    const data = await res.json();
+    if (data.error) {
+      status.textContent = '❌ ' + data.error;
+      status.style.color = 'var(--red)';
+    } else {
+      const names = (data.saved || []).map(m => m.name || m).join(', ');
+      status.textContent = `✅ Сохранено: ${names}`;
+      status.style.color = 'var(--green)';
+      if (data.errors && data.errors.length) {
+        status.textContent += '  ⚠ ' + data.errors.join('; ');
+      }
+      await refreshModelList();
+    }
+  } catch(e) {
+    status.textContent = '❌ ' + e.message;
+    status.style.color = 'var(--red)';
+  }
+
+  setTimeout(() => { prog.style.display = 'none'; bar.style.width = '0%';
+                     status.style.color = ''; }, 3000);
+}
+
+// Initial load
+updateModelStatus();
+// Preload model list in background so sidebar badges show on page load
+fetch('/models/list').then(r => r.json()).then(d => {
+  _allModels = d.models || [];
+  updateModelStatus();
+});
+</script>
+</body>
+</html>

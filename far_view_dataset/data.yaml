@@ -1,0 +1,7 @@
+names:
+- boots
+- wheels
+nc: 2
+path: C:/Users/shche/Desktop/Application_for_models/far_view_dataset
+train: train/images
+val: val/images
