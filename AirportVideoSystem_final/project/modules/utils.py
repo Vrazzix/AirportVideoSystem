@@ -74,3 +74,26 @@ def is_point_near_box(px: float, py: float, box: list, margin: int = 50) -> bool
     """Returns True if point (px, py) is within margin pixels of box [x1, y1, x2, y2]."""
     x1, y1, x2, y2 = box
     return (x1 - margin <= px <= x2 + margin) and (y1 - margin <= py <= y2 + margin)
+
+
+def box_gap(box_a: list, box_b: list) -> float:
+    """
+    Smallest gap (in pixels) between two axis-aligned boxes [x1, y1, x2, y2].
+
+    Returns 0.0 if the boxes overlap, otherwise the Euclidean distance between
+    their nearest edges/corners.
+    """
+    ax1, ay1, ax2, ay2 = box_a
+    bx1, by1, bx2, by2 = box_b
+    dx = max(bx1 - ax2, ax1 - bx2, 0.0)
+    dy = max(by1 - ay2, ay1 - by2, 0.0)
+    return (dx * dx + dy * dy) ** 0.5
+
+
+def is_box_near_box(box_a: list, box_b: list, margin: float = 0.0) -> bool:
+    """
+    True if box_a is within `margin` pixels of box_b (overlap counts as near).
+
+    Used to express spatial rules like "chock is placed at the wheel".
+    """
+    return box_gap(box_a, box_b) <= margin

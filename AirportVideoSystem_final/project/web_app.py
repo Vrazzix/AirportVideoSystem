@@ -21,7 +21,55 @@ from flask import (Flask, Response, jsonify, render_template,
                    request, send_file, stream_with_context)
 
 sys.path.insert(0, os.path.dirname(__file__))
-from modules import SimpleTracker, process_frame
+from modules import process_frame, EventEngine
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Declarative event rules
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _build_event_rules(cfg: dict) -> list:
+    """Translate the job cfg into a declarative list of event rules."""
+    return [
+        {
+            'id':       'chock_at_wheel',
+            'kind':     'proximity',
+            'source':   'combo',
+            'enabled':  cfg['use_wheels'],
+            'class_a':  cfg['chock_class'],
+            'class_b':  cfg['wheel_class'],
+            'margin':   cfg['chock_wheel_margin'],
+            'anchor':   'b',                       # wheel = observability anchor
+            'on_frames':  cfg['event_on_frames'],
+            'off_frames': cfg['event_off_frames'],
+            'on_type':  'chock_placed',  'off_type':  'chock_removed',
+            'on_label': 'Колодки установлены', 'off_label': 'Колодки сняты',
+            'on_icon':  '✅', 'off_icon': '⚠️',
+            'status_on':  'ГОТОВО: Колодки установлены!',
+            'status_off': 'ОЖИДАНИЕ: Установите колодки',
+            'color_on':  [0, 255, 0], 'color_off': [0, 0, 255],
+        },
+        {
+            'id':       'door_boarding',
+            'kind':     'presence',
+            'source':   'door',
+            'enabled':  cfg['use_door'],
+            # "hatch" visible (alone or with "door") = open → boarding;
+            # only "door" (no hatch) = closed → boarding finished.
+            'class_id': cfg['hatch_class'],        # ON indicator = hatch
+            'off_class': cfg['door_class'],        # explicit closed state = door
+            'on_frames':  cfg['door_on_frames'],
+            'off_frames': cfg['door_off_frames'],
+            'on_type':  'door_open',  'off_type':  'door_closed',
+            'on_label': 'Дверь открыта — посадка началась',
+            'off_label': 'Посадка завершена (дверь закрыта)',
+            'on_icon':  '🚪', 'off_icon': '🔒',
+            'status_on':  'ПОСАДКА: дверь открыта',
+            'status_off': 'Дверь закрыта',
+            'color_on':  [0, 200, 255], 'color_off': [120, 120, 120],
+            'show_timer': True,                    # live ⏱ open→close timer
+        },
+    ]
 
 # ─────────────────────────────────────────────────────────────────────────────
 app = Flask(__name__)
@@ -29,6 +77,7 @@ app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024 * 1024   # 2 GB
 
 OUTPUT_DIR = os.path.join(os.path.dirname(__file__), 'flask_output')
 MODELS_DIR = os.path.join(os.path.dirname(__file__), 'uploaded_models')
+DEFAULT_MODELS_DIR = os.path.join(os.path.dirname(__file__), 'models')
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 os.makedirs(MODELS_DIR, exist_ok=True)
 
@@ -134,6 +183,8 @@ def _new_job() -> dict:
         'result':       None,
         'error':        None,
         'cancel_event': threading.Event(),   # set() to request cancellation
+        'events':       [],          # list of event dicts (svc_status transitions)
+        'event_thumbs': {},          # event_id → JPEG bytes
     }
 
 
@@ -174,6 +225,8 @@ def _process_job(job_id: str, input_path: str, cfg: dict):
             m = _load_model(cfg['model_person']); m and loaded.update(person=m)
         if cfg['use_pose']:
             m = _load_model(cfg['model_pose']);   m and loaded.update(pose=m)
+        if cfg.get('use_door'):
+            m = _load_model(cfg['model_door']);   m and loaded.update(door=m)
 
         if not loaded:
             raise RuntimeError('No models loaded — check model paths')
@@ -191,9 +244,17 @@ def _process_job(job_id: str, input_path: str, cfg: dict):
 
         job['total'] = total_frames   # -1 = live stream (unknown)
 
-        # ── Tracker ───────────────────────────────────────────────────────────
-        tracker = (SimpleTracker(iou_threshold=cfg['iou_thresh'])
-                   if cfg['tracking_enabled'] else None)
+        # ── ByteTrack: сбрасываем состояние трекера для нового видео ─────────
+        combo_m = loaded.get('combo')
+        if combo_m is not None and hasattr(combo_m, 'predictor'):
+            combo_m.predictor = None
+        tracker = None  # трекинг теперь внутри model.track()
+
+        # ── Declarative event engine (chock↔wheel, door→boarding, …) ─────────
+        event_engine = EventEngine(_build_event_rules(cfg))
+
+        # ── Inference device ('auto' → let Ultralytics decide) ───────────────
+        device = None if cfg.get('device', 'auto') == 'auto' else cfg['device']
 
         filter_cfg = {
             'filter_enabled':   cfg['filter_enabled'],
@@ -254,18 +315,50 @@ def _process_job(job_id: str, input_path: str, cfg: dict):
                 continue
 
             if frame_idx % cfg['every_n'] == 0:
-                annotated, svc_status, svc_color = process_frame(
-                    frame,
-                    loaded.get('combo'), loaded.get('person'), loaded.get('pose'),
-                    cfg['use_wheels'], cfg['use_person'], cfg['use_pose'],
-                    cfg['conf_wheels'], cfg['conf_person'], cfg['conf_pose_kpt'],
-                    cfg['imgsz'],
-                    cfg['line_thickness'], cfg['font_scale'],
-                    svc_status, svc_color, cfg['show_status_bar'],
-                    tracker, cfg['show_track_ids'], True,
-                    filter_cfg=filter_cfg,
-                    tracking_enabled=cfg['tracking_enabled'],
-                )
+
+                def _run(dev):
+                    return process_frame(
+                        frame,
+                        loaded.get('combo'), loaded.get('person'), loaded.get('pose'),
+                        cfg['use_wheels'], cfg['use_person'], cfg['use_pose'],
+                        cfg['conf_wheels'], cfg['conf_person'], cfg['conf_pose_kpt'],
+                        cfg['imgsz'],
+                        cfg['line_thickness'], cfg['font_scale'],
+                        svc_status, svc_color, cfg['show_status_bar'],
+                        tracker, cfg['show_track_ids'], True,
+                        filter_cfg=filter_cfg,
+                        tracking_enabled=cfg['tracking_enabled'],
+                        chock_wheel_margin=cfg['chock_wheel_margin'],
+                        device=dev,
+                        use_half=cfg['use_half'],
+                        event_engine=event_engine,
+                        door_model=loaded.get('door'),
+                        conf_door=cfg['conf_door'],
+                        door_classes=sorted({cfg['door_class'], cfg['hatch_class']}),
+                        frame_idx=frame_idx,
+                        time_sec=time.time() - t_start,
+                    )
+
+                try:
+                    annotated, svc_status, svc_color = _run(device)
+                except RuntimeError as exc:
+                    # CUDA failure → fall back to CPU for the rest of the job
+                    if device != 'cpu' and 'CUDA' in str(exc).upper():
+                        print(f'[JOB {job_id}] CUDA error — switching to CPU: {exc}')
+                        device = 'cpu'
+                        if combo_m is not None and hasattr(combo_m, 'predictor'):
+                            combo_m.predictor = None   # reset ByteTrack state
+                        annotated, svc_status, svc_color = _run(device)
+                    else:
+                        raise
+
+                # ── Drain event transitions fired by the engine this frame ───
+                for ev in event_engine.drain_events():
+                    _, thumb_buf = cv2.imencode('.jpg', annotated,
+                                               [cv2.IMWRITE_JPEG_QUALITY, 80])
+                    job['event_thumbs'][ev['id']] = thumb_buf.tobytes()
+                    job['events'].append(ev)
+
                 if writer is not None:
                     writer.write(annotated)
                 proc_cnt += 1
@@ -431,9 +524,9 @@ def start_process(job_id: str):
     cfg = request.get_json(force=True)
 
     # Defaults for any missing keys
-    cfg.setdefault('model_wheels',    'C:\\Users\\shche\\Desktop\\Application_for_models\\models\\BestBoots_v2.pt')
-    cfg.setdefault('model_person',    'C:\\Users\\shche\\Desktop\\Application_for_models\\models\\person.pt')
-    cfg.setdefault('model_pose',      'C:\\Users\\shche\\Desktop\\Application_for_models\\models\\BestPose.pt')
+    cfg.setdefault('model_wheels',    os.path.join(DEFAULT_MODELS_DIR, 'BestBoots_v2.pt'))
+    cfg.setdefault('model_person',    os.path.join(DEFAULT_MODELS_DIR, 'person.pt'))
+    cfg.setdefault('model_pose',      os.path.join(DEFAULT_MODELS_DIR, 'BestPose.pt'))
     cfg.setdefault('use_wheels',      True)
     cfg.setdefault('use_person',      True)
     cfg.setdefault('use_pose',        True)
@@ -453,6 +546,19 @@ def start_process(job_id: str):
     cfg.setdefault('chock_max_asp',   4.0)
     cfg.setdefault('tracking_enabled', True)
     cfg.setdefault('iou_thresh',       0.3)
+    cfg.setdefault('chock_wheel_margin', 80)    # px: chock↔wheel proximity for event
+    cfg.setdefault('event_on_frames',    5)     # frames to confirm "placed"
+    cfg.setdefault('event_off_frames',   15)    # frames to confirm "removed"
+    cfg.setdefault('device',          'auto')   # 'auto' | 'cpu' | 'cuda' | '0'
+    cfg.setdefault('use_half',        False)     # FP16 off by default (safer on GPU)
+    # ── Door → boarding event (separate door/hatch model) ───────────────────
+    cfg.setdefault('use_door',        False)
+    cfg.setdefault('model_door',      os.path.join(DEFAULT_MODELS_DIR, 'door.pt'))
+    cfg.setdefault('door_class',      0)        # class id of "door" in the door model
+    cfg.setdefault('hatch_class',     1)        # class id of "hatch" (open indicator)
+    cfg.setdefault('conf_door',       0.35)
+    cfg.setdefault('door_on_frames',  5)        # frames to confirm "door open"
+    cfg.setdefault('door_off_frames', 20)       # frames to confirm "door closed"
     cfg.setdefault('line_thickness',   2)
     cfg.setdefault('font_scale',       0.6)
     cfg.setdefault('show_status_bar',  True)
@@ -491,12 +597,13 @@ def stream(job_id: str):
                 return
 
             payload = {
-                'status':    job['status'],
-                'frame':     job['frame'],
-                'total':     job['total'],
-                'processed': job['processed'],
-                'fps_proc':  job['fps_proc'],
-                'eta':       job['eta'],
+                'status':       job['status'],
+                'frame':        job['frame'],
+                'total':        job['total'],
+                'processed':    job['processed'],
+                'fps_proc':     job['fps_proc'],
+                'eta':          job['eta'],
+                'events_count': len(job['events']),
             }
 
             if job['status'] == 'done':
@@ -565,6 +672,33 @@ def stream_video(job_id: str):
         return 'Not found', 404
     return send_file(path, mimetype='video/mp4',
                      conditional=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Events routes
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.route('/events/<job_id>')
+def get_events(job_id: str):
+    """Return all events for a job (svc_status transition log)."""
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+    if job is None:
+        return jsonify(error='Job not found'), 404
+    return jsonify(events=job['events'])
+
+
+@app.route('/events/<job_id>/thumb/<event_id>')
+def event_thumb(job_id: str, event_id: str):
+    """Return event thumbnail JPEG."""
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+    if job is None:
+        return 'Not found', 404
+    thumb = job.get('event_thumbs', {}).get(event_id)
+    if thumb is None:
+        return 'Not found', 404
+    return Response(thumb, mimetype='image/jpeg')
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -5,6 +5,9 @@ build/
 dist/
 wheels/
 *.egg-info
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
 # Virtual environments
 .venv
@@ -12,19 +15,58 @@ wheels/
 
 # Large datasets and files
 *.zip
+*.7z
+*.rar
 downloaded_images/
 boots_dataset-*.zip
 hard_negatives/
 auto_labeled/
+datasets/
+diploma/
+research/
+media/
+archive/
+local_artifacts/
+coco_val2017/
+flask_output/
+output/
+slam_output/
+uploads/
+AirportVideoSystem_final/project/app_streamlit.py
+AirportVideoSystem_final/project/benchmark_onnx.py
+AirportVideoSystem_final/project/convert_onnx.py
+AirportVideoSystem_final/project/diagnose_detection.py
+AirportVideoSystem_final/project/diagnostic_frame_0.jpg
+AirportVideoSystem_final/project/optimize_cpu.py
+AirportVideoSystem_final/project/process_video.py
+AirportVideoSystem_final/project/slam_only.py
 
 # Model weights (store only code, not trained weights)
 models/*.pt
 models/*.pth
+*.pt
+*.pth
+*.onnx
+*.engine
+*.tflite
+*.pb
+*.bin
+*_openvino_model/
+uploaded_models/
 
 # YOLOv8 training outputs
 runs/
+ga_runs/
+inference_compare/
 *.avi
 *.mp4
+*.mov
+*.mkv
+*.wmv
+
+# Notebooks and generated reports
+.ipynb_checkpoints/
+kernel.errors.txt
 
 # IDE & Tools
 .vscode/

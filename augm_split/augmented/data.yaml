@@ -1,6 +1,0 @@
-path: C:/Users/shche/Desktop/Application_for_models/augm_split/augmented
-train: train/images
-val: val/images
-
-nc: 2
-names: ['chock', 'wheel']

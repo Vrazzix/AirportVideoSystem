@@ -239,6 +239,54 @@
   .upload-progress .bar-fill { height: 100%; background: var(--accent);
                                 transition: width .3s; width: 0%; }
 
+  /* ── Events ──────────────────────────────────────────────────── */
+  #section-events { display: none; }
+  .events-header { justify-content: space-between; }
+  .events-badge {
+    background: var(--accent); color: #fff;
+    border-radius: 99px; padding: 1px 8px;
+    font-size: 11px; font-weight: 700; margin-left: 6px;
+    vertical-align: middle;
+  }
+  .events-list {
+    display: flex; flex-direction: column; gap: 8px;
+    max-height: 340px; overflow-y: auto; margin-top: 4px;
+  }
+  .events-empty { color: var(--text2); font-size: 13px;
+                  text-align: center; padding: 24px 0; }
+  .event-item {
+    display: flex; align-items: center; gap: 12px;
+    padding: 10px 14px; border-radius: 8px;
+    background: var(--bg); border: 1px solid var(--bg3);
+    border-left-width: 4px;
+  }
+  .event-item.chock_placed  { border-left-color: var(--green); }
+  .event-item.chock_removed { border-left-color: var(--amber); }
+  .event-item.door_open     { border-left-color: var(--accent); }
+  .event-item.door_closed   { border-left-color: var(--text2); }
+  .event-icon  { font-size: 1.4rem; flex-shrink: 0; }
+  .event-body  { flex: 1; min-width: 0; }
+  .event-label { font-weight: 600; font-size: 13px; }
+  .event-meta  { font-size: 11px; color: var(--text2); margin-top: 2px; }
+  .event-thumb {
+    width: 72px; height: 46px; object-fit: cover;
+    border-radius: 4px; cursor: pointer;
+    border: 1px solid var(--bg3); flex-shrink: 0;
+    transition: opacity .15s;
+  }
+  .event-thumb:hover { opacity: .8; }
+
+  /* ── Thumbnail lightbox ───────────────────────────────────────── */
+  #thumb-lightbox {
+    display: none; position: fixed; inset: 0;
+    background: rgba(0,0,0,.82); z-index: 200;
+    align-items: center; justify-content: center; cursor: pointer;
+  }
+  #thumb-lightbox img {
+    max-width: 92vw; max-height: 90vh;
+    border-radius: 10px; box-shadow: 0 8px 40px rgba(0,0,0,.6);
+  }
+
   /* ── Scrollbar ────────────────────────────────────────────────── */
   ::-webkit-scrollbar { width: 6px; }
   ::-webkit-scrollbar-track { background: var(--bg); }
@@ -255,18 +303,23 @@
 
   <label>🛞 Комбо (колёса+колодки)</label>
   <input type="text" id="model_wheels"
-    value="C:\Users\shche\Desktop\Application_for_models\models\BestBoots_v2.pt">
+    value="models/BestBoots_v2.pt">
   <div class="sidebar-model-info" id="info_model_wheels"></div>
 
   <label>🧑 Люди</label>
   <input type="text" id="model_person"
-    value="C:\Users\shche\Desktop\Application_for_models\models\person.pt">
+    value="models/person.pt">
   <div class="sidebar-model-info" id="info_model_person"></div>
 
   <label>🦴 Поза (MPII-16)</label>
   <input type="text" id="model_pose"
-    value="C:\Users\shche\Desktop\Application_for_models\models\BestPose.pt">
+    value="models/BestPose.pt">
   <div class="sidebar-model-info" id="info_model_pose"></div>
+
+  <label>🚪 Дверь/люк</label>
+  <input type="text" id="model_door"
+    value="models/door.pt">
+  <div class="sidebar-model-info" id="info_model_door"></div>
 
   <div class="sidebar-section">
   <h2>🎭 Активные модули</h2>
@@ -276,6 +329,8 @@
     <label for="use_person">🧑 Детекция людей</label></div>
   <div class="toggle-row"><input type="checkbox" id="use_pose" checked>
     <label for="use_pose">🦴 Поза</label></div>
+  <div class="toggle-row"><input type="checkbox" id="use_door">
+    <label for="use_door">🚪 Дверь → посадка</label></div>
   </div>
 
   <div class="sidebar-section">
@@ -351,6 +406,46 @@
   <label>IoU порог: <span id="lbl_iou_thresh">0.30</span></label>
   <input type="range" id="iou_thresh" min="0.1" max="0.8" step="0.05" value="0.3"
     oninput="document.getElementById('lbl_iou_thresh').textContent=parseFloat(this.value).toFixed(2)">
+  </div>
+
+  <div class="sidebar-section">
+  <h2>🔔 Событие «колодка у колеса»</h2>
+  <label>Порог близости колодка↔колесо, px: <span id="lbl_chock_wheel_margin">80</span></label>
+  <input type="range" id="chock_wheel_margin" min="0" max="300" step="5" value="80"
+    oninput="document.getElementById('lbl_chock_wheel_margin').textContent=this.value">
+
+  <label>Кадров для подтверждения установки: <span id="lbl_event_on_frames">5</span></label>
+  <input type="range" id="event_on_frames" min="1" max="30" step="1" value="5"
+    oninput="document.getElementById('lbl_event_on_frames').textContent=this.value">
+
+  <label>Кадров для подтверждения снятия: <span id="lbl_event_off_frames">15</span></label>
+  <input type="range" id="event_off_frames" min="1" max="60" step="1" value="15"
+    oninput="document.getElementById('lbl_event_off_frames').textContent=this.value">
+  </div>
+
+  <div class="sidebar-section">
+  <h2>🚪 Событие «дверь → посадка»</h2>
+  <div style="font-size:11px;color:var(--text2);margin-bottom:4px;">
+    Требует включённого модуля «Дверь → посадка» и назначенной door-модели.
+    Логика: виден «Люк» (один или с «Дверью») → посадка идёт;
+    только «Дверь» без «Люка» → посадка завершена.
+  </div>
+  <label>ID класса «Дверь» (door)</label>
+  <input type="number" id="door_class" value="0" min="0" max="20">
+  <label>ID класса «Люк» (hatch)</label>
+  <input type="number" id="hatch_class" value="1" min="0" max="20">
+
+  <label>Conf — дверь/люк: <span id="lbl_conf_door">0.35</span></label>
+  <input type="range" id="conf_door" min="0.05" max="1" step="0.05" value="0.35"
+    oninput="document.getElementById('lbl_conf_door').textContent=parseFloat(this.value).toFixed(2)">
+
+  <label>Кадров для подтверждения открытия: <span id="lbl_door_on_frames">5</span></label>
+  <input type="range" id="door_on_frames" min="1" max="30" step="1" value="5"
+    oninput="document.getElementById('lbl_door_on_frames').textContent=this.value">
+
+  <label>Кадров для подтверждения закрытия: <span id="lbl_door_off_frames">20</span></label>
+  <input type="range" id="door_off_frames" min="1" max="90" step="1" value="20"
+    oninput="document.getElementById('lbl_door_off_frames').textContent=this.value">
   </div>
 
   <div class="sidebar-section">
@@ -497,6 +592,19 @@
     </div>
   </div>
 
+  <!-- Events -->
+  <div class="card" id="section-events">
+    <div class="card-title events-header">
+      <span>🔔 События <span class="events-badge" id="events-count-badge">0</span></span>
+      <button class="btn btn-dl" onclick="exportEvents()" style="font-size:12px;padding:6px 14px;">
+        ⬇️ Экспорт JSON
+      </button>
+    </div>
+    <div id="events-list" class="events-list">
+      <div class="events-empty">Событий пока нет</div>
+    </div>
+  </div>
+
   <!-- Results -->
   <div id="section-results">
     <div class="card">
@@ -520,6 +628,11 @@
   </div>
 
 </main>
+
+<!-- ═══════════════════════  THUMBNAIL LIGHTBOX  ════════════════════════ -->
+<div id="thumb-lightbox" onclick="this.style.display='none'">
+  <img id="thumb-lightbox-img" src="" alt="event frame">
+</div>
 
 <!-- ═══════════════════════  MODEL MANAGER MODAL  ═══════════════════════ -->
 <div class="modal-overlay" id="modal-models">
@@ -603,6 +716,7 @@ async function handleFile(file) {
   document.getElementById('section-meta').style.display       = 'none';
   document.getElementById('section-progress').style.display   = 'none';
   document.getElementById('section-results').style.display    = 'none';
+  document.getElementById('section-events').style.display     = 'none';
   document.getElementById('cancelled-banner').style.display   = 'none';
 
   dropZone.innerHTML = `<div class="icon">⏳</div>
@@ -648,9 +762,11 @@ function collectCfg() {
     model_wheels:      v('model_wheels'),
     model_person:      v('model_person'),
     model_pose:        v('model_pose'),
+    model_door:        v('model_door'),
     use_wheels:        c('use_wheels'),
     use_person:        c('use_person'),
     use_pose:          c('use_pose'),
+    use_door:          c('use_door'),
     wheel_class:       +v('wheel_class'),
     chock_class:       +v('chock_class'),
     conf_wheels:       +v('conf_wheels'),
@@ -667,6 +783,14 @@ function collectCfg() {
     chock_max_asp:     +v('chock_max_asp'),
     tracking_enabled:  c('tracking_enabled'),
     iou_thresh:        +v('iou_thresh'),
+    chock_wheel_margin: +v('chock_wheel_margin'),
+    event_on_frames:   +v('event_on_frames'),
+    event_off_frames:  +v('event_off_frames'),
+    door_class:        +v('door_class'),
+    hatch_class:       +v('hatch_class'),
+    conf_door:         +v('conf_door'),
+    door_on_frames:    +v('door_on_frames'),
+    door_off_frames:   +v('door_off_frames'),
     line_thickness:    +v('line_thickness'),
     font_scale:        +v('font_scale'),
     show_status_bar:   c('show_status_bar'),
@@ -745,6 +869,9 @@ async function startProcessing() {
   cancelBtn.textContent = '✕ Отменить';
   btn.textContent = '⏳ Обработка...';
 
+  // Events panel
+  startEventsPolling();
+
   // Live preview polling
   previewInterval = setInterval(() => {
     document.getElementById('live-preview').src =
@@ -780,6 +907,10 @@ function handleProgress(d) {
     `Обработано: <b>${d.processed}</b> кадров&nbsp;&nbsp;Скорость: <b>${d.fps_proc}</b> fps` +
     (d.status === 'reconnecting' ? '&nbsp;&nbsp;<span style="color:var(--amber)">⚠ переподключение...</span>' : '');
 
+  if (d.events_count != null) {
+    document.getElementById('events-count-badge').textContent = d.events_count;
+  }
+
   if (d.status === 'done')      showResults(d.result);
   if (d.status === 'cancelled') showCancelled();
   if (d.status === 'error')     { showError(d.error); stopPolling(); }
@@ -807,6 +938,7 @@ function showCancelled() {
 
 function showResults(r) {
   stopPolling();
+  fetchEvents();   // final fetch to capture any last event
   document.getElementById('section-progress').style.display = 'none';
   document.getElementById('section-results').style.display  = 'block';
   document.getElementById('btn-start').textContent = '🚀 Запустить снова';
@@ -828,6 +960,7 @@ function showResults(r) {
 function stopPolling() {
   clearInterval(previewInterval);
   if (sseSource) { sseSource.close(); sseSource = null; }
+  stopEventsPolling();
 }
 
 function showError(msg) {
@@ -842,6 +975,88 @@ function fmtSec(s) {
   return Math.floor(s/3600) + 'ч ' + Math.floor((s%3600)/60) + ' мин';
 }
 
+function fmtDur(sec) {
+  sec = Math.round(Math.max(0, +sec || 0));
+  const m = Math.floor(sec / 60), s = sec % 60;
+  if (m >= 60) {
+    const h = Math.floor(m / 60);
+    return `${h}:${String(m % 60).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+  }
+  return `${m}:${String(s).padStart(2,'0')}`;
+}
+
+// ── Events ────────────────────────────────────────────────────────────────
+let eventsInterval = null;
+let _events = [];
+
+function startEventsPolling() {
+  document.getElementById('section-events').style.display = 'block';
+  _events = [];
+  renderEvents([]);
+  if (eventsInterval) clearInterval(eventsInterval);
+  eventsInterval = setInterval(fetchEvents, 2000);
+}
+
+function stopEventsPolling() {
+  clearInterval(eventsInterval);
+  eventsInterval = null;
+}
+
+async function fetchEvents() {
+  if (!currentJobId) return;
+  try {
+    const res  = await fetch(`/events/${currentJobId}`);
+    const data = await res.json();
+    _events = data.events || [];
+    renderEvents(_events);
+  } catch(e) { /* ignore */ }
+}
+
+function renderEvents(events) {
+  const badge = document.getElementById('events-count-badge');
+  const list  = document.getElementById('events-list');
+  badge.textContent = events.length;
+
+  if (!events.length) {
+    list.innerHTML = '<div class="events-empty">Событий пока нет</div>';
+    return;
+  }
+
+  list.innerHTML = events.map(ev => `
+    <div class="event-item ${ev.type}">
+      <div class="event-icon">${ev.icon}</div>
+      <div class="event-body">
+        <div class="event-label">${ev.label}</div>
+        <div class="event-meta">Кадр ${ev.frame} &nbsp;·&nbsp; ${ev.time_sec} с${
+          ev.duration_sec != null
+            ? ` &nbsp;·&nbsp; ⏱ длительность ${fmtDur(ev.duration_sec)}`
+            : ''}</div>
+      </div>
+      ${ev.thumb
+        ? `<img class="event-thumb"
+               src="/events/${currentJobId}/thumb/${ev.id}"
+               onclick="showThumb(this.src)"
+               title="Нажмите для просмотра">`
+        : ''}
+    </div>`).join('');
+}
+
+function showThumb(src) {
+  const lb = document.getElementById('thumb-lightbox');
+  document.getElementById('thumb-lightbox-img').src = src;
+  lb.style.display = 'flex';
+}
+
+function exportEvents() {
+  if (!_events.length) { alert('Событий нет'); return; }
+  const blob = new Blob([JSON.stringify(_events, null, 2)],
+                        {type: 'application/json'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `events_${currentJobId || 'job'}.json`;
+  a.click();
+}
+
 // ── Model status (sidebar info badges) ───────────────────────────────────
 const FMT_LABELS = {
   pytorch: 'PyTorch', onnx: 'ONNX', openvino: 'OpenVINO',
@@ -854,12 +1069,13 @@ function updateModelStatus() {
     { inputId: 'model_wheels', infoId: 'info_model_wheels', msId: 'ms-wheels' },
     { inputId: 'model_person', infoId: 'info_model_person', msId: 'ms-person' },
     { inputId: 'model_pose',   infoId: 'info_model_pose',   msId: 'ms-pose'   },
+    { inputId: 'model_door',   infoId: 'info_model_door',   msId: null        },
   ];
   slots.forEach(s => {
     const path = document.getElementById(s.inputId).value.trim();
     const name = path.split(/[\\/]/).pop() || '—';
-    const msEl = document.getElementById(s.msId);
-    msEl.textContent = name;
+    const msEl = s.msId ? document.getElementById(s.msId) : null;
+    if (msEl) msEl.textContent = name;
 
     // find in loaded model list for format info
     const found = _allModels.find(m => m.path === path || m.name === name);
@@ -868,16 +1084,16 @@ function updateModelStatus() {
       const lbl = FMT_LABELS[found.format] || found.format;
       infoEl.innerHTML = `<span class="fmt-badge fmt-${found.format}">${lbl}</span>
                           <span>${found.size_mb} МБ</span>`;
-      msEl.className = 'ok';
+      if (msEl) msEl.className = 'ok';
     } else {
       infoEl.innerHTML = '';
       const validExt = /\.(pt|onnx|engine|tflite|pb)$/i.test(name) || !name.includes('.');
-      msEl.className = validExt ? 'ok' : 'miss';
+      if (msEl) msEl.className = validExt ? 'ok' : 'miss';
     }
   });
 }
 
-['model_wheels','model_person','model_pose'].forEach(id =>
+['model_wheels','model_person','model_pose','model_door'].forEach(id =>
   document.getElementById(id).addEventListener('input', updateModelStatus));
 
 
@@ -919,6 +1135,7 @@ function renderModelTable(models) {
   const curWheels = document.getElementById('model_wheels').value;
   const curPerson = document.getElementById('model_person').value;
   const curPose   = document.getElementById('model_pose').value;
+  const curDoor   = document.getElementById('model_door').value;
 
   tbody.innerHTML = models.map(m => {
     const lbl = FMT_LABELS[m.format] || m.format;
@@ -927,6 +1144,7 @@ function renderModelTable(models) {
     const wActive = m.path === curWheels ? 'active' : '';
     const pActive = m.path === curPerson ? 'active' : '';
     const oActive = m.path === curPose   ? 'active' : '';
+    const dActive = m.path === curDoor   ? 'active' : '';
 
     const delBtn = isUpload
       ? `<button class="btn-del-model" onclick="deleteModel('${esc(m.path)}', this)" title="Удалить">🗑</button>`
@@ -942,6 +1160,7 @@ function renderModelTable(models) {
           <button class="btn-assign ${wActive}" onclick="assignModel('wheels','${esc(m.path)}')">🛞 Колёса</button>
           <button class="btn-assign ${pActive}" onclick="assignModel('person','${esc(m.path)}')">🧑 Люди</button>
           <button class="btn-assign ${oActive}" onclick="assignModel('pose','${esc(m.path)}')">🦴 Поза</button>
+          <button class="btn-assign ${dActive}" onclick="assignModel('door','${esc(m.path)}')">🚪 Дверь</button>
         </div>
       </td>
       <td>${delBtn}</td>
@@ -952,7 +1171,7 @@ function renderModelTable(models) {
 function esc(s) { return s.replace(/\\/g, '\\\\').replace(/'/g, "\\'"); }
 
 function assignModel(slot, path) {
-  const map = { wheels: 'model_wheels', person: 'model_person', pose: 'model_pose' };
+  const map = { wheels: 'model_wheels', person: 'model_person', pose: 'model_pose', door: 'model_door' };
   document.getElementById(map[slot]).value = path;
   updateModelStatus();
   // Re-render table to update active buttons
