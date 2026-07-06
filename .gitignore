@@ -12,6 +12,7 @@ wheels/
 # Virtual environments
 .venv
 .env
+.streamlit/
 
 # Large datasets and files
 *.zip
@@ -32,14 +33,14 @@ flask_output/
 output/
 slam_output/
 uploads/
-AirportVideoSystem_final/project/app_streamlit.py
-AirportVideoSystem_final/project/benchmark_onnx.py
-AirportVideoSystem_final/project/convert_onnx.py
-AirportVideoSystem_final/project/diagnose_detection.py
-AirportVideoSystem_final/project/diagnostic_frame_0.jpg
-AirportVideoSystem_final/project/optimize_cpu.py
-AirportVideoSystem_final/project/process_video.py
-AirportVideoSystem_final/project/slam_only.py
+AirportVideoSystem/app_streamlit.py
+AirportVideoSystem/benchmark_onnx.py
+AirportVideoSystem/convert_onnx.py
+AirportVideoSystem/diagnose_detection.py
+AirportVideoSystem/diagnostic_frame_0.jpg
+AirportVideoSystem/optimize_cpu.py
+AirportVideoSystem/process_video.py
+AirportVideoSystem/slam_only.py
 
 # Model weights (store only code, not trained weights)
 models/*.pt
